@@ -1,0 +1,399 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <errno.h>
+#include <sys/queue.h>
+#include <unistd.h>
+#include <stdlib.h>
+
+#include "immintrin.h"
+
+#include <rte_common.h>
+#include <rte_vect.h>
+#include <rte_byteorder.h>
+#include <rte_log.h>
+#include <rte_memory.h>
+#include <rte_memzone.h>
+#include <rte_launch.h>
+#include <rte_eal.h>
+#include <rte_per_lcore.h>
+#include <rte_lcore.h>
+#include <rte_debug.h>
+#include <rte_ethdev.h>
+#include <rte_mempool.h>
+#include <rte_mbuf.h>
+#include <rte_cycles.h>
+#include <rte_ip.h>
+#include <rte_udp.h>
+
+#include "barrier.h"
+
+#define MEMPOOL_CACHE_SIZE   256
+#define MAX_PKT_BURST        32
+
+typedef struct {
+	int num_ports;
+	int num_tx_queues;
+	int num_rx_queues;
+	int packet_size;
+} config_t;
+
+config_t conf = {
+	.num_ports = 2,
+	.num_tx_queues = 1,
+	.num_rx_queues = 1,
+	.packet_size = 64,
+};
+
+#define TICKS_TO_NSEC(x) ((x) * 1000 / ticks_per_usec)
+int ticks_per_usec = 1700;
+worker_barrier_t *b;
+static struct rte_mempool * pktmbuf_pool;
+
+static void __attribute__ ((unused))
+hexdump(uint8_t buffer[], int len)
+{
+#define HEXDUMP_LINE_LEN	16
+	int i;
+	char s[HEXDUMP_LINE_LEN+1];
+	bzero(s, HEXDUMP_LINE_LEN+1);
+
+	for(i=0; i < len; i++) {
+		if (!(i%HEXDUMP_LINE_LEN)) {
+			if (s[0])
+				printf("[%s]",s);
+			printf("\n%05x: ", i);
+			bzero(s, HEXDUMP_LINE_LEN);
+		}
+		s[i%HEXDUMP_LINE_LEN]=isprint(buffer[i])?buffer[i]:'.';
+		printf("%02x ", buffer[i]);
+	}
+	while(i++%HEXDUMP_LINE_LEN)
+		printf("   ");
+
+	printf("[%s]\n", s);
+}
+
+static uint8_t broadcast_addr[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+
+static struct rte_eth_conf port_conf = {
+	.rxmode = {
+		.mq_mode = ETH_MQ_RX_RSS,
+		.max_rx_pkt_len = ETHER_MAX_LEN,
+		.split_hdr_size = 0,
+		.header_split   = 0, /**< Header Split disabled */
+		.hw_ip_checksum = 0, /**< IP checksum offload enabled */
+		.hw_vlan_filter = 0,
+		.hw_vlan_strip  = 0,
+		.hw_vlan_extend = 0,
+		.jumbo_frame    = 0, /**< Jumbo Frame Support disabled */
+		.hw_strip_crc   = 1, /**< CRC stripped by hardware */
+	},
+	.rx_adv_conf = {
+		.rss_conf = {
+			.rss_key = NULL,
+			.rss_hf = ETH_RSS_UDP | ETH_RSS_IP | ETH_RSS_TCP /*ETH_RSS_IP*/,
+		},
+	},
+	.txmode = {
+		.mq_mode = ETH_MQ_TX_NONE,
+	},
+};
+
+typedef enum {
+	THREAD_RX,
+	THREAD_TX
+} thread_type_t;
+
+typedef struct {
+	char cacheline0[0] __attribute__((aligned(2*64)));
+	int port;
+	int queue;
+	thread_type_t type;
+	int lcore_id;
+
+	/* packet data */
+	uint16_t pkt_len;
+	struct ether_addr src_mac;
+	struct ether_addr dst_mac;
+	uint32_t src_ip4;
+	uint32_t dst_ip4;
+	uint16_t src_port;
+	uint16_t dst_port;
+
+	/* stats */
+	uint64_t num_tx_pkts;
+	uint64_t old_tx_pkts;
+	uint64_t num_tx_octets;
+	uint64_t num_rx_pkts;
+	uint64_t old_rx_pkts;
+	uint64_t num_rx_octets;
+	uint64_t last_tsc;
+	uint64_t latency_sum;
+} per_thread_data_t;
+
+static inline void *
+craft_packet(per_thread_data_t * ptd, struct rte_mbuf *pkt)
+{
+	struct ether_hdr * eth;
+	struct ipv4_hdr * ip4;
+	struct udp_hdr * udp;
+	eth = rte_pktmbuf_mtod_offset(pkt, struct ether_hdr *, 0);
+	ip4 = rte_pktmbuf_mtod_offset(pkt, struct ipv4_hdr *, sizeof(*eth));
+	udp = rte_pktmbuf_mtod_offset(pkt, struct udp_hdr *, sizeof(*eth)+sizeof(*ip4));
+
+	/* Metadata */
+	pkt->next = 0;
+	pkt->nb_segs = 1;
+	rte_pktmbuf_data_len (pkt) = ptd->pkt_len;
+	rte_pktmbuf_pkt_len (pkt) = ptd->pkt_len;
+
+	/* Ethernet */
+	eth->ether_type = rte_cpu_to_be_16(ETHER_TYPE_IPv4);
+	ether_addr_copy(&ptd->src_mac, &eth->s_addr);
+	ether_addr_copy(&ptd->dst_mac, &eth->d_addr);
+
+	/* IPv4 */
+	ip4->version_ihl     = 0x45;
+	ip4->type_of_service = 0;
+	ip4->fragment_offset = 0;
+	ip4->time_to_live    = 64;
+	ip4->next_proto_id   = 17 /* UDP */;
+	ip4->packet_id       = 0;
+	ip4->total_length   = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth));
+	ip4->src_addr = rte_cpu_to_be_32(ptd->src_ip4);
+	ip4->dst_addr = rte_cpu_to_be_32(ptd->dst_ip4);
+	ip4->hdr_checksum = rte_ipv4_cksum(ip4);
+
+	/* UDP */
+	udp->src_port = rte_cpu_to_be_16(ptd->src_port);
+	udp->dst_port = rte_cpu_to_be_16(ptd->dst_port);
+	udp->dgram_len = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth) - sizeof(*ip4));
+	udp->dgram_cksum = 0;
+
+	return (udp+1);
+}
+
+static int
+lcore_tx_main(__attribute__((unused)) void *arg)
+{
+	unsigned lcore_id;
+	per_thread_data_t * ptd = (per_thread_data_t *) arg;
+	uint64_t tsc, last_run_tsc = 0;
+
+	lcore_id = rte_lcore_id();
+	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
+
+	while(1) {
+		worker_barrier_check(b);
+		tsc = ptd->last_tsc = rte_rdtsc_precise();
+
+		if (tsc > last_run_tsc + ticks_per_usec * 10) {
+			last_run_tsc = tsc;
+			struct rte_mbuf *pkt;
+			pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+			uint64_t  * payload = craft_packet(ptd, pkt);
+			//hexdump(rte_pktmbuf_mtod_offset(pkt, void *, 0), ptd->pkt_len);
+			*payload = rte_rdtsc_precise();
+			rte_eth_tx_burst(ptd->port, 0, &pkt, 1);
+			ptd->num_tx_pkts ++;
+			ptd->num_tx_octets += ptd->pkt_len;
+		}
+
+	}
+
+	return 0;
+}
+
+static int
+lcore_rx_main(__attribute__((unused)) void *arg)
+{
+	int nb_rx = 0;
+	int i;
+	unsigned lcore_id;
+	struct rte_mbuf *pkts[MAX_PKT_BURST];
+	per_thread_data_t * ptd = (per_thread_data_t *) arg;
+
+	lcore_id = rte_lcore_id();
+	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
+
+	while(1) {
+		worker_barrier_check(b);
+		ptd->last_tsc = rte_rdtsc_precise();
+		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, MAX_PKT_BURST);
+		uint64_t *tsc1, tsc2 = rte_rdtsc_precise();
+		if (!nb_rx)
+			continue;
+
+		ptd->num_rx_pkts += nb_rx;
+
+		for (i = 0; i < nb_rx; i++) {
+			tsc1 = rte_pktmbuf_mtod_offset(pkts[i], uint64_t *, 14+20+8);
+			//printf("port %u queue %u tx_timestamp %lu rx_timestamp %lu delte %lu (%lu ns)\n", 
+			//       ptd->port, ptd->queue, *tsc1, tsc2, tsc2-*tsc1, TICKS_TO_NSEC(tsc2-*tsc1));
+			//hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
+			ptd->latency_sum += tsc2-*tsc1;
+			rte_pktmbuf_free(pkts[i]);
+		}
+	}
+
+	return 0;
+}
+
+int
+main(int argc, char **argv)
+{
+	int ret;
+	int socketid = 0;
+	int lcore_id;
+	struct rte_eth_txconf *txconf;
+	struct rte_eth_dev_info dev_info;
+	int p, q, d;
+	per_thread_data_t * ptd, * ptd_copy;
+	int num_threads = conf.num_ports * (conf.num_rx_queues + conf.num_tx_queues);
+
+	ret = rte_eal_init(argc, argv);
+	if (ret < 0)
+		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
+
+	pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool0", 32768,
+					       MEMPOOL_CACHE_SIZE, 0,
+					       RTE_MBUF_DEFAULT_BUF_SIZE, 0);
+
+	if (pktmbuf_pool == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
+
+	if (rte_eth_dev_count() !=  conf.num_ports)
+		rte_exit(EXIT_FAILURE, "Please whitelist only %u device\n",
+		         conf.num_ports);
+
+	for (p = 0; p < conf.num_ports; p++) {
+
+		ret = rte_eth_dev_configure(p, conf.num_rx_queues, 1, &port_conf);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_configure:"
+			         " err=%d, port=%d\n", ret, p);
+
+		for (q = 0; q < conf.num_rx_queues; q++) {
+			ret = rte_eth_rx_queue_setup(p, q, 512, socketid, NULL, pktmbuf_pool);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE,"rte_eth_rx_queue_setup:"
+				         " err=%d, port=%d queue=%d\n", ret, p, q);
+		}
+
+		/* Setup TX queue */
+		rte_eth_dev_info_get(p, &dev_info);
+		txconf = &dev_info.default_txconf;
+		for (q = 0; q < conf.num_tx_queues; q++) {
+			ret = rte_eth_tx_queue_setup(p, 0, 512, socketid, txconf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:"
+				         " err=%d, port=%d queue %d\n", ret, p, q);
+		}
+
+		rte_eth_promiscuous_enable(p);
+
+		ret = rte_eth_dev_start(p);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d,"
+			         " port=%d\n", ret, p);
+	}
+
+	b = worker_barrier_init(num_threads);
+
+	ptd = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
+	ptd_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
+	memset(ptd, 0, num_threads * sizeof(per_thread_data_t));
+
+	p = q = d = 0;
+
+	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
+		int threads_per_port = conf.num_tx_queues + conf.num_tx_queues;
+		int i = p * threads_per_port + q;
+		if (p == conf.num_ports)
+			continue;
+
+		ptd[i].port = p;
+		ptd[i].lcore_id = lcore_id;
+
+		if (q < conf.num_tx_queues) {
+			ptd[i].queue = q;
+			ptd[i].type = THREAD_TX;
+			rte_eth_macaddr_get (p, &ptd[i].src_mac);
+			rte_memcpy(&ptd[i].dst_mac, broadcast_addr, 6);
+			ptd[i].src_ip4 = IPv4(172, 16, p+1, 2);
+			ptd[i].dst_ip4 = IPv4(172, 16, p+1, 1);
+			ptd[i].src_port = 1024 + p*16 + q;
+			ptd[i].dst_port = 2048 + p*16 + q;
+			ptd[i].pkt_len = conf.packet_size;
+			rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
+		} else {
+			ptd[i].queue = q - conf.num_tx_queues;
+			ptd[i].type = THREAD_RX;
+			rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
+		}
+
+		q++;
+		if (q == threads_per_port) {
+			q = 0;
+			p++;
+		}
+	}
+
+	while (1) {
+		uint64_t tot_pkts = 0;
+		uint64_t tot_pps = 0;
+		uint64_t min_tsc = ~0;
+		uint64_t max_tsc = 0;
+
+		sleep(3);
+
+		worker_barrier_sync(b);
+		memcpy(ptd_copy, ptd, num_threads * sizeof(per_thread_data_t));
+		worker_barrier_release(b);
+
+		printf("\n==========\n");
+		printf("%-30s: %lu ticks (%lu ns)\n", "Barrier duration",
+		       worker_barrier_last_duration(b),
+		       TICKS_TO_NSEC(worker_barrier_last_duration(b)));
+
+		for (q = 0; q < num_threads; q++) {
+			if (ptd_copy[q].last_tsc < min_tsc)
+				min_tsc = ptd_copy[q].last_tsc;
+
+			if (ptd_copy[q].last_tsc > max_tsc)
+				max_tsc = ptd_copy[q].last_tsc;
+		}
+
+		printf("%-30s: %lu ticks (%lu ns)\n", "TSC drift",
+		       max_tsc - min_tsc, TICKS_TO_NSEC(max_tsc - min_tsc));
+
+		for (q = 0; q < num_threads; q++) {
+
+			if (ptd_copy[q].type != THREAD_RX) {
+				printf("Port %u queue %u tx pkts        : %-15lu (%lu pps)\n",
+				       ptd_copy[q].port, ptd_copy[q].queue,
+				       ptd_copy[q].num_tx_pkts,
+				       ptd_copy[q].num_tx_pkts -
+				       ptd_copy[q].old_tx_pkts);
+			} else {
+				printf("Port %u queue %u rx pkts        : %-15lu (%lu pps)\n",
+				       ptd_copy[q].port, ptd_copy[q].queue,
+				       ptd_copy[q].num_rx_pkts,
+				       ptd_copy[q].num_rx_pkts -
+				       ptd_copy[q].old_rx_pkts);
+
+				printf("Port %u queue %u avg latency    : %-15lu (%lu ns)\n",
+				       ptd_copy[q].port, ptd_copy[q].queue,
+				       ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
+				       TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts));
+				tot_pkts += ptd_copy[q].num_rx_pkts;
+				tot_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+			}
+		}
+		printf("%-30s: %-15lu (%lu pps)\n", "Total rx pkts", tot_pkts, tot_pps);
+	}
+
+	rte_eal_mp_wait_lcore();
+	return 0;
+}
