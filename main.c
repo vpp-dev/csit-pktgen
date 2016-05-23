@@ -5,7 +5,8 @@
 #include <sys/queue.h>
 #include <unistd.h>
 #include <stdlib.h>
-
+#include <signal.h>
+#include <time.h>
 #include "immintrin.h"
 
 #include <rte_common.h>
@@ -27,26 +28,20 @@
 #include <rte_udp.h>
 
 #include "barrier.h"
+#include "config.h"
 
 #define MEMPOOL_CACHE_SIZE   256
 #define MAX_PKT_BURST        32
 
-typedef struct {
-	int num_ports;
-	int num_tx_queues;
-	int num_rx_queues;
-	int packet_size;
-} config_t;
-
-config_t conf = {
-	.num_ports = 2,
-	.num_tx_queues = 1,
-	.num_rx_queues = 1,
-	.packet_size = 64,
-};
+config_t *conf = NULL;
 
 #define TICKS_TO_NSEC(x) ((x) * 1000 / ticks_per_usec)
 int ticks_per_usec = 1700;
+int should_quit = 0;
+volatile int rx_should_stop = 0; /* >0 to stop all rx threads */
+volatile int tx_should_stop = 0; /* >0 to stop all rx threads */
+struct timespec started, stopped;
+
 worker_barrier_t *b;
 static struct rte_mempool * pktmbuf_pool;
 
@@ -132,6 +127,25 @@ typedef struct {
 	uint64_t latency_sum;
 } per_thread_data_t;
 
+static inline unsigned int calibrate()
+{
+	fd_set rfds;
+	struct timeval tv;
+	uint64_t tsc1, tsc2;
+
+	tv.tv_sec = 0;
+	tv.tv_usec = 300000;
+	FD_ZERO(&rfds);
+	FD_SET(0, &rfds);
+
+	/* wait 300ms here */
+	tsc1 = rte_rdtsc_precise();
+	select(1, &rfds, NULL, NULL, &tv);
+	tsc2 = rte_rdtsc_precise();
+
+	return ((tsc2-tsc1)/300000);
+}
+
 static inline void *
 craft_packet(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 {
@@ -184,7 +198,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
 
-	while(1) {
+	while(!tx_should_stop) {
 		worker_barrier_check(b);
 		tsc = ptd->last_tsc = rte_rdtsc_precise();
 
@@ -199,7 +213,6 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 			ptd->num_tx_pkts ++;
 			ptd->num_tx_octets += ptd->pkt_len;
 		}
-
 	}
 
 	return 0;
@@ -217,7 +230,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
 
-	while(1) {
+	while(!rx_should_stop) {
 		worker_barrier_check(b);
 		ptd->last_tsc = rte_rdtsc_precise();
 		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, MAX_PKT_BURST);
@@ -229,7 +242,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 
 		for (i = 0; i < nb_rx; i++) {
 			tsc1 = rte_pktmbuf_mtod_offset(pkts[i], uint64_t *, 14+20+8);
-			//printf("port %u queue %u tx_timestamp %lu rx_timestamp %lu delte %lu (%lu ns)\n", 
+			//printf("port %u queue %u tx_timestamp %lu rx_timestamp %lu delte %lu (%lu ns)\n",
 			//       ptd->port, ptd->queue, *tsc1, tsc2, tsc2-*tsc1, TICKS_TO_NSEC(tsc2-*tsc1));
 			//hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 			ptd->latency_sum += tsc2-*tsc1;
@@ -240,8 +253,26 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	return 0;
 }
 
-int
-main(int argc, char **argv)
+static void signal_stop(__attribute__((unused)) int signal)
+{
+	printf("\nSIGSTOP received, exitting...\n");
+	should_quit = 1;
+}
+
+static uint64_t clock_diff(struct timespec start, struct timespec end)
+{
+	struct timespec temp;
+	if ((end.tv_nsec-start.tv_nsec)<0) {
+		temp.tv_sec = end.tv_sec-start.tv_sec-1;
+		temp.tv_nsec = 1000000000+end.tv_nsec-start.tv_nsec;
+	} else {
+		temp.tv_sec = end.tv_sec-start.tv_sec;
+		temp.tv_nsec = end.tv_nsec-start.tv_nsec;
+	}
+	return temp.tv_sec*1000+temp.tv_nsec/1000000;
+}
+
+int main(int argc, char **argv)
 {
 	int ret;
 	int socketid = 0;
@@ -250,45 +281,54 @@ main(int argc, char **argv)
 	struct rte_eth_dev_info dev_info;
 	int p, q, d;
 	per_thread_data_t * ptd, * ptd_copy;
-	int num_threads = conf.num_ports * (conf.num_rx_queues + conf.num_tx_queues);
 
-	ret = rte_eal_init(argc, argv);
+	parse_cmdline(argc, argv);
+
+	conf = get_config();
+	int num_threads = conf->num_ports * (conf->num_rx_queues + conf->num_tx_queues);
+
+	signal(SIGINT, signal_stop);
+	ticks_per_usec = calibrate();
+	printf("Detected %u RTC ticks per usec.\n", ticks_per_usec);
+
+
+	ret = rte_eal_init(0, argv);
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
 
 	pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool0", 32768,
-					       MEMPOOL_CACHE_SIZE, 0,
-					       RTE_MBUF_DEFAULT_BUF_SIZE, 0);
+										   MEMPOOL_CACHE_SIZE, 0,
+										   RTE_MBUF_DEFAULT_BUF_SIZE, 0);
 
 	if (pktmbuf_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
 
-	if (rte_eth_dev_count() !=  conf.num_ports)
+	if (rte_eth_dev_count() !=  conf->num_ports)
 		rte_exit(EXIT_FAILURE, "Please whitelist only %u device\n",
-		         conf.num_ports);
+				 conf->num_ports);
 
-	for (p = 0; p < conf.num_ports; p++) {
+	for (p = 0; p < conf->num_ports; p++) {
 
-		ret = rte_eth_dev_configure(p, conf.num_rx_queues, 1, &port_conf);
+		ret = rte_eth_dev_configure(p, conf->num_rx_queues, 1, &port_conf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_dev_configure:"
-			         " err=%d, port=%d\n", ret, p);
+								   " err=%d, port=%d\n", ret, p);
 
-		for (q = 0; q < conf.num_rx_queues; q++) {
+		for (q = 0; q < conf->num_rx_queues; q++) {
 			ret = rte_eth_rx_queue_setup(p, q, 512, socketid, NULL, pktmbuf_pool);
 			if (ret < 0)
 				rte_exit(EXIT_FAILURE,"rte_eth_rx_queue_setup:"
-				         " err=%d, port=%d queue=%d\n", ret, p, q);
+									  " err=%d, port=%d queue=%d\n", ret, p, q);
 		}
 
 		/* Setup TX queue */
 		rte_eth_dev_info_get(p, &dev_info);
 		txconf = &dev_info.default_txconf;
-		for (q = 0; q < conf.num_tx_queues; q++) {
+		for (q = 0; q < conf->num_tx_queues; q++) {
 			ret = rte_eth_tx_queue_setup(p, 0, 512, socketid, txconf);
 			if (ret < 0)
 				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:"
-				         " err=%d, port=%d queue %d\n", ret, p, q);
+									   " err=%d, port=%d queue %d\n", ret, p, q);
 		}
 
 		rte_eth_promiscuous_enable(p);
@@ -296,7 +336,7 @@ main(int argc, char **argv)
 		ret = rte_eth_dev_start(p);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d,"
-			         " port=%d\n", ret, p);
+								   " port=%d\n", ret, p);
 	}
 
 	b = worker_barrier_init(num_threads);
@@ -307,16 +347,17 @@ main(int argc, char **argv)
 
 	p = q = d = 0;
 
+	clock_gettime(CLOCK_MONOTONIC, &started);
 	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-		int threads_per_port = conf.num_tx_queues + conf.num_tx_queues;
+		int threads_per_port = conf->num_tx_queues + conf->num_tx_queues;
 		int i = p * threads_per_port + q;
-		if (p == conf.num_ports)
+		if (p == conf->num_ports)
 			continue;
 
 		ptd[i].port = p;
 		ptd[i].lcore_id = lcore_id;
 
-		if (q < conf.num_tx_queues) {
+		if (q < conf->num_tx_queues) {
 			ptd[i].queue = q;
 			ptd[i].type = THREAD_TX;
 			rte_eth_macaddr_get (p, &ptd[i].src_mac);
@@ -325,10 +366,10 @@ main(int argc, char **argv)
 			ptd[i].dst_ip4 = IPv4(172, 16, p+1, 1);
 			ptd[i].src_port = 1024 + p*16 + q;
 			ptd[i].dst_port = 2048 + p*16 + q;
-			ptd[i].pkt_len = conf.packet_size;
+			ptd[i].pkt_len = conf->packet_size;
 			rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
 		} else {
-			ptd[i].queue = q - conf.num_tx_queues;
+			ptd[i].queue = q - conf->num_tx_queues;
 			ptd[i].type = THREAD_RX;
 			rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
 		}
@@ -340,22 +381,33 @@ main(int argc, char **argv)
 		}
 	}
 
-	while (1) {
-		uint64_t tot_pkts = 0;
-		uint64_t tot_pps = 0;
+	while (!should_quit) {
+		uint64_t tot_rx_pkts = 0;
+		uint64_t tot_rx_pps = 0;
+		uint64_t tot_tx_pkts = 0;
+		uint64_t tot_tx_pps = 0;
 		uint64_t min_tsc = ~0;
 		uint64_t max_tsc = 0;
+		uint64_t pps;
 
 		sleep(3);
 
+		if (should_quit)
+			break;
+
 		worker_barrier_sync(b);
 		memcpy(ptd_copy, ptd, num_threads * sizeof(per_thread_data_t));
+		/* save old values */
+		for (q = 0; q < num_threads; q++) {
+			ptd[q].old_tx_pkts = ptd[q].num_tx_pkts;
+			ptd[q].old_rx_pkts = ptd[q].num_rx_pkts;
+		}
 		worker_barrier_release(b);
 
 		printf("\n==========\n");
 		printf("%-30s: %lu ticks (%lu ns)\n", "Barrier duration",
-		       worker_barrier_last_duration(b),
-		       TICKS_TO_NSEC(worker_barrier_last_duration(b)));
+			   worker_barrier_last_duration(b),
+			   TICKS_TO_NSEC(worker_barrier_last_duration(b)));
 
 		for (q = 0; q < num_threads; q++) {
 			if (ptd_copy[q].last_tsc < min_tsc)
@@ -366,34 +418,69 @@ main(int argc, char **argv)
 		}
 
 		printf("%-30s: %lu ticks (%lu ns)\n", "TSC drift",
-		       max_tsc - min_tsc, TICKS_TO_NSEC(max_tsc - min_tsc));
+			   max_tsc - min_tsc, TICKS_TO_NSEC(max_tsc - min_tsc));
 
 		for (q = 0; q < num_threads; q++) {
 
 			if (ptd_copy[q].type != THREAD_RX) {
-				printf("Port %u queue %u tx pkts        : %-15lu (%lu pps)\n",
-				       ptd_copy[q].port, ptd_copy[q].queue,
-				       ptd_copy[q].num_tx_pkts,
-				       ptd_copy[q].num_tx_pkts -
-				       ptd_copy[q].old_tx_pkts);
-			} else {
-				printf("Port %u queue %u rx pkts        : %-15lu (%lu pps)\n",
-				       ptd_copy[q].port, ptd_copy[q].queue,
-				       ptd_copy[q].num_rx_pkts,
-				       ptd_copy[q].num_rx_pkts -
-				       ptd_copy[q].old_rx_pkts);
+				pps = ptd_copy[q].num_tx_pkts - ptd_copy[q].old_tx_pkts;
+				printf("Port %u queue %u tx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
+					   ptd_copy[q].port, ptd_copy[q].queue,
+					   ptd_copy[q].num_tx_pkts,
+					   pps,
+					   pps * conf->packet_size * 8 / 3000);
+				tot_tx_pkts += ptd_copy[q].num_tx_pkts;
+				tot_tx_pps += ptd_copy[q].num_tx_pkts - ptd_copy[q].old_tx_pkts;
 
-				printf("Port %u queue %u avg latency    : %-15lu (%lu ns)\n",
-				       ptd_copy[q].port, ptd_copy[q].queue,
-				       ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
-				       TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts));
-				tot_pkts += ptd_copy[q].num_rx_pkts;
-				tot_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+			} else {
+				pps = ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+				printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
+					   ptd_copy[q].port, ptd_copy[q].queue,
+					   ptd_copy[q].num_rx_pkts,
+					   pps,
+					   pps * conf->packet_size * 8 / 3000);
+
+				printf("Port %u queue %u avg latency    : %15lu (%lu ns)\n",
+					   ptd_copy[q].port, ptd_copy[q].queue,
+					   ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
+					   TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts));
+				tot_rx_pkts += ptd_copy[q].num_rx_pkts;
+				tot_rx_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
 			}
 		}
-		printf("%-30s: %-15lu (%lu pps)\n", "Total rx pkts", tot_pkts, tot_pps);
+		printf("%-30s: %15lu (%lu pps)\n", "Total Tx pkts", tot_tx_pkts, tot_tx_pps);
+		printf("%-30s: %15lu (%lu pps)\n", "Total Rx pkts", tot_rx_pkts, tot_rx_pps);
 	}
 
+	printf("Stopping Tx threads and waiting for Rx threads to finish\n");
+	tx_should_stop = 1;
+	clock_gettime(CLOCK_MONOTONIC, &stopped);
+	usleep(100000);
+	rx_should_stop = 1;
 	rte_eal_mp_wait_lcore();
+
+	uint64_t tot_rx_pkts = 0;
+	uint64_t tot_tx_pkts = 0;
+	uint64_t time_diff = clock_diff(started, stopped);
+
+	for (q = 0; q < num_threads; q++) {
+		if (ptd[q].type != THREAD_RX) {
+			tot_tx_pkts += ptd[q].num_tx_pkts;
+
+		} else {
+			tot_rx_pkts += ptd[q].num_rx_pkts;
+		}
+	}
+	printf("--- pktgen traffic statistics ---\n");
+	printf("%lu packets transmitted, %lu received, lost %lu (%i%% packet loss), time %lu ms\n",
+		   tot_tx_pkts, tot_rx_pkts,
+		   tot_tx_pkts - tot_rx_pkts,
+		   (int)((tot_tx_pkts - tot_rx_pkts) * 100 / tot_tx_pkts),
+		   time_diff);
+
+	printf("Duration %lu miliseconds, average throughput %lu kbit/s\n",
+		   time_diff,
+		   ((tot_tx_pkts + tot_rx_pkts) * conf->packet_size * 8 / time_diff));
+
 	return 0;
 }
