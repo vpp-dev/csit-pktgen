@@ -125,9 +125,12 @@ typedef struct {
 	uint64_t old_rx_pkts;
 	uint64_t num_rx_octets;
 	uint64_t last_tsc;
+
 	uint64_t latency_sum;
-	uint64_t latency_min;
+	uint64_t latency_min; /* total latency */
 	uint64_t latency_max;
+	uint64_t latency_min_interval; /* per interval latency */
+	uint64_t latency_max_interval;
 } per_thread_data_t;
 
 static inline unsigned int calibrate()
@@ -234,8 +237,8 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
 
-	ptd->latency_min = 0xffffffffffffffff;
-	ptd->latency_max = 0;
+	ptd->latency_min_interval = 0xffffffffffffffff;
+	ptd->latency_max_interval = 0;
 
 	while(!rx_should_stop) {
 		worker_barrier_check(b);
@@ -255,10 +258,10 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			latency = tsc2-*tsc1;
 
 			ptd->latency_sum += latency;
-			if (latency < ptd->latency_min)
-				ptd->latency_min = latency;
-			if (latency > ptd->latency_max)
-				ptd->latency_max = latency;
+			if (latency < ptd->latency_min_interval)
+				ptd->latency_min_interval = latency;
+			if (latency > ptd->latency_max_interval)
+				ptd->latency_max_interval = latency;
 
 			rte_pktmbuf_free(pkts[i]);
 		}
@@ -397,6 +400,8 @@ int main(int argc, char **argv)
 		} else {
 			ptd[i].queue = q - conf->num_tx_queues;
 			ptd[i].type = THREAD_RX;
+			ptd[i].latency_min = 0xffffffffffffffff;
+			ptd[i].latency_max = 0;
 			rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
 		}
 
@@ -431,7 +436,16 @@ int main(int argc, char **argv)
 			/* save old values */
 			ptd[q].old_tx_pkts = ptd[q].num_tx_pkts;
 			ptd[q].old_rx_pkts = ptd[q].num_rx_pkts;
+
+			/* calculate max/min latency per life */
+			if (ptd[q].latency_min_interval < ptd[q].latency_min)
+				ptd[q].latency_min = ptd[q].latency_min_interval;
+			if (ptd[q].latency_max_interval > ptd[q].latency_max)
+				ptd[q].latency_max = ptd[q].latency_max_interval;
+			ptd[q].latency_min_interval = 0xffffffffffffffff;
+			ptd[q].latency_max_interval = 0;
 		}
+
 		worker_barrier_release(b);
 
 		printf("\n==========\n");
@@ -474,8 +488,8 @@ int main(int argc, char **argv)
 					   ptd_copy[q].port, ptd_copy[q].queue,
 					   ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
 					   TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts),
-					   TICKS_TO_NSEC(ptd_copy[q].latency_max),
-					   TICKS_TO_NSEC(ptd_copy[q].latency_min));
+					   TICKS_TO_NSEC(ptd_copy[q].latency_max_interval),
+					   TICKS_TO_NSEC(ptd_copy[q].latency_min_interval));
 
 				tot_rx_pkts += ptd_copy[q].num_rx_pkts;
 				tot_rx_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
@@ -504,7 +518,7 @@ int main(int argc, char **argv)
 			tot_tx_pkts += ptd[q].num_tx_pkts;
 
 		} else {
-			tot_rx_pkts += ptd[q].num_rx_pkts/ptd[q].num_rx_pkts;
+			tot_rx_pkts += ptd[q].num_rx_pkts;
 			latency_avg += ptd[q].latency_sum/ptd[q].num_rx_pkts;
 
 			if (latency_min > ptd[q].latency_min)
