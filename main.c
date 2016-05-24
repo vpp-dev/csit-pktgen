@@ -109,6 +109,7 @@ typedef struct {
 
 	/* packet data */
 	uint16_t pkt_len;
+	uint64_t pkts_to_transmit; /* stop tx thread after this number is reached */
 	struct ether_addr src_mac;
 	struct ether_addr dst_mac;
 	uint32_t src_ip4;
@@ -125,6 +126,8 @@ typedef struct {
 	uint64_t num_rx_octets;
 	uint64_t last_tsc;
 	uint64_t latency_sum;
+	uint64_t latency_min;
+	uint64_t latency_max;
 } per_thread_data_t;
 
 static inline unsigned int calibrate()
@@ -224,11 +227,15 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	int nb_rx = 0;
 	int i;
 	unsigned lcore_id;
+	uint64_t latency;
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
 	per_thread_data_t * ptd = (per_thread_data_t *) arg;
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
+
+	ptd->latency_min = 0xffffffffffffffff;
+	ptd->latency_max = 0;
 
 	while(!rx_should_stop) {
 		worker_barrier_check(b);
@@ -245,7 +252,14 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			//printf("port %u queue %u tx_timestamp %lu rx_timestamp %lu delte %lu (%lu ns)\n",
 			//       ptd->port, ptd->queue, *tsc1, tsc2, tsc2-*tsc1, TICKS_TO_NSEC(tsc2-*tsc1));
 			//hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
-			ptd->latency_sum += tsc2-*tsc1;
+			latency = tsc2-*tsc1;
+
+			ptd->latency_sum += latency;
+			if (latency < ptd->latency_min)
+				ptd->latency_min = latency;
+			if (latency > ptd->latency_max)
+				ptd->latency_max = latency;
+
 			rte_pktmbuf_free(pkts[i]);
 		}
 	}
@@ -256,6 +270,11 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 static void signal_stop(__attribute__((unused)) int signal)
 {
 	printf("\nSIGSTOP received, exitting...\n");
+	should_quit = 1;
+}
+
+static void signal_alarm(__attribute__((unused)) int signal)
+{
 	should_quit = 1;
 }
 
@@ -279,22 +298,29 @@ int main(int argc, char **argv)
 	int lcore_id;
 	struct rte_eth_txconf *txconf;
 	struct rte_eth_dev_info dev_info;
-	int p, q, d;
+	int p, q, d, i;
 	per_thread_data_t * ptd, * ptd_copy;
+	int num_threads;
 
-	parse_cmdline(argc, argv);
+	for (i=0; i<argc; i++)
+		if (!strncmp(argv[i], "--", 2))
+			break;
+
+	parse_cmdline(argc-i, &argv[i]); /* parameters after "--" are for pktgen */
+
+	ret = rte_eal_init(i, argv); /* first parameter set is for dpdk, separated with "--" */
+	if (ret < 0)
+		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
 
 	conf = get_config();
-	int num_threads = conf->num_ports * (conf->num_rx_queues + conf->num_tx_queues);
+	num_threads = conf->num_ports * (conf->num_rx_queues + conf->num_tx_queues);
 
 	signal(SIGINT, signal_stop);
+	signal(SIGALRM, signal_alarm);
+
 	ticks_per_usec = calibrate();
 	printf("Detected %u RTC ticks per usec.\n", ticks_per_usec);
 
-
-	ret = rte_eal_init(0, argv);
-	if (ret < 0)
-		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
 
 	pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool0", 32768,
 										   MEMPOOL_CACHE_SIZE, 0,
@@ -381,6 +407,9 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (conf->duration)
+		alarm(conf->duration);
+
 	while (!should_quit) {
 		uint64_t tot_rx_pkts = 0;
 		uint64_t tot_rx_pps = 0;
@@ -390,15 +419,16 @@ int main(int argc, char **argv)
 		uint64_t max_tsc = 0;
 		uint64_t pps;
 
-		sleep(3);
+		sleep(conf->stats_interval);
 
 		if (should_quit)
 			break;
 
 		worker_barrier_sync(b);
 		memcpy(ptd_copy, ptd, num_threads * sizeof(per_thread_data_t));
-		/* save old values */
+
 		for (q = 0; q < num_threads; q++) {
+			/* save old values */
 			ptd[q].old_tx_pkts = ptd[q].num_tx_pkts;
 			ptd[q].old_rx_pkts = ptd[q].num_rx_pkts;
 		}
@@ -428,7 +458,7 @@ int main(int argc, char **argv)
 					   ptd_copy[q].port, ptd_copy[q].queue,
 					   ptd_copy[q].num_tx_pkts,
 					   pps,
-					   pps * conf->packet_size * 8 / 3000);
+					   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
 				tot_tx_pkts += ptd_copy[q].num_tx_pkts;
 				tot_tx_pps += ptd_copy[q].num_tx_pkts - ptd_copy[q].old_tx_pkts;
 
@@ -438,12 +468,15 @@ int main(int argc, char **argv)
 					   ptd_copy[q].port, ptd_copy[q].queue,
 					   ptd_copy[q].num_rx_pkts,
 					   pps,
-					   pps * conf->packet_size * 8 / 3000);
+					   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
 
-				printf("Port %u queue %u avg latency    : %15lu (%lu ns)\n",
+				printf("Port %u queue %u avg latency    : %15lu (%lu ns), max: (%lu ns), min: (%lu ns)\n",
 					   ptd_copy[q].port, ptd_copy[q].queue,
 					   ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
-					   TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts));
+					   TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts),
+					   TICKS_TO_NSEC(ptd_copy[q].latency_max),
+					   TICKS_TO_NSEC(ptd_copy[q].latency_min));
+
 				tot_rx_pkts += ptd_copy[q].num_rx_pkts;
 				tot_rx_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
 			}
@@ -461,6 +494,9 @@ int main(int argc, char **argv)
 
 	uint64_t tot_rx_pkts = 0;
 	uint64_t tot_tx_pkts = 0;
+	uint64_t latency_avg = 0;
+	uint64_t latency_min = 0xffffffffffffffff;
+	uint64_t latency_max = 0;
 	uint64_t time_diff = clock_diff(started, stopped);
 
 	for (q = 0; q < num_threads; q++) {
@@ -468,7 +504,13 @@ int main(int argc, char **argv)
 			tot_tx_pkts += ptd[q].num_tx_pkts;
 
 		} else {
-			tot_rx_pkts += ptd[q].num_rx_pkts;
+			tot_rx_pkts += ptd[q].num_rx_pkts/ptd[q].num_rx_pkts;
+			latency_avg += ptd[q].latency_sum/ptd[q].num_rx_pkts;
+
+			if (latency_min > ptd[q].latency_min)
+				latency_min = ptd[q].latency_min;
+			if (latency_max < ptd[q].latency_max)
+				latency_max = ptd[q].latency_max;
 		}
 	}
 	printf("--- pktgen traffic statistics ---\n");
@@ -478,9 +520,11 @@ int main(int argc, char **argv)
 		   (int)((tot_tx_pkts - tot_rx_pkts) * 100 / tot_tx_pkts),
 		   time_diff);
 
-	printf("Duration %lu miliseconds, average throughput %lu kbit/s\n",
-		   time_diff,
-		   ((tot_tx_pkts + tot_rx_pkts) * conf->packet_size * 8 / time_diff));
+	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu\n",
+		   ((tot_tx_pkts + tot_rx_pkts) * conf->packet_size * 8 / time_diff),
+		   TICKS_TO_NSEC(latency_min),
+		   TICKS_TO_NSEC(latency_avg/(conf->num_ports * conf->num_rx_queues)),
+		   TICKS_TO_NSEC(latency_max));
 
 	return 0;
 }
