@@ -18,7 +18,7 @@ static config_t conf = {
 	.packet_size = 64,
 };
 
-config_t *get_config()
+config_t *get_config(void)
 {
 	return &conf;
 }
@@ -27,17 +27,17 @@ static void print_usage(void)
 {
 	printf("usage:\ncsit-pktgen [dpdk-args] -- [pktgen args]\n\n"
 		   "  --help - this help\n"
-		   "  --stats_interval n - wait n seconds between printing statistics\n"
+		   "  --stats-interval n - wait n seconds between printing statistics\n"
 		   "  --duration n - stop after n seconds\n"
 		   "\n"
 		   "  --src-ips - source IP addr\n"
 		   "  --dst-ips - destination IP addr\n"
 		   "  --dst-macs - mac addr\n"
-		   "  --packet_size - packet size in bytes including header\n"
+		   "  --packet-size - packet size in bytes including header\n"
 		   "\n"
-		   "  --num_ports - number of physical ethernet port used\n"
-		   "  --num_tx_queues - number of transmit processing threads\n"
-		   "  --num_rx_queues - number of receive processing threads\n"
+		   "  --num-ports - number of physical ethernet port used\n"
+		   "  --num-tx-queues - number of transmit processing threads\n"
+		   "  --num-rx-queues - number of receive processing threads\n"
 		   "\n"
 		);
 }
@@ -54,14 +54,14 @@ int parse_cmdline(int argc, char **argv)
 		int option_index = 0;
 		static struct option long_options[] = {
 		{"help",          no_argument,       0, HELP},
-		{"stats_interval",required_argument, 0, STATS_INTERVAL},
+		{"stats-interval",required_argument, 0, STATS_INTERVAL},
 		{"duration",      required_argument, 0, DURATION},
 
-		{"num_ports",     required_argument, 0, NUM_PORTS},
-		{"num_tx_queues", required_argument, 0, NUM_TX_QUEUES},
-		{"num_rx_queues", required_argument, 0, NUM_RX_QUEUES},
+		{"num-ports",     required_argument, 0, NUM_PORTS},
+		{"num-tx-queues", required_argument, 0, NUM_TX_QUEUES},
+		{"num-rx-queues", required_argument, 0, NUM_RX_QUEUES},
 
-		{"packet_size",   required_argument, 0, PACKET_SIZE},
+		{"packet-size",   required_argument, 0, PACKET_SIZE},
 		{"src-ips",       required_argument, 0, SRC_IPS},
 		{"dst-ips",       required_argument, 0, DST_IPS},
 		{"dst-macs",      required_argument, 0, DST_MACS},

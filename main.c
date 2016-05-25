@@ -133,7 +133,7 @@ typedef struct {
 	uint64_t latency_max_interval;
 } per_thread_data_t;
 
-static inline unsigned int calibrate()
+static inline unsigned int calibrate(void)
 {
 	fd_set rfds;
 	struct timeval tv;
