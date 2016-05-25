@@ -133,25 +133,6 @@ typedef struct {
 	uint64_t latency_max_interval;
 } per_thread_data_t;
 
-static inline unsigned int calibrate(void)
-{
-	fd_set rfds;
-	struct timeval tv;
-	uint64_t tsc1, tsc2;
-
-	tv.tv_sec = 0;
-	tv.tv_usec = 300000;
-	FD_ZERO(&rfds);
-	FD_SET(0, &rfds);
-
-	/* wait 300ms here */
-	tsc1 = rte_rdtsc_precise();
-	select(1, &rfds, NULL, NULL, &tv);
-	tsc2 = rte_rdtsc_precise();
-
-	return ((tsc2-tsc1)/300000);
-}
-
 static inline void *
 craft_packet(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 {
@@ -321,9 +302,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, signal_stop);
 	signal(SIGALRM, signal_alarm);
 
-	ticks_per_usec = calibrate();
-	printf("Detected %u RTC ticks per usec.\n", ticks_per_usec);
-
+	ticks_per_usec = rte_get_tsc_hz()/1000000;
 
 	pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool0", 32768,
 										   MEMPOOL_CACHE_SIZE, 0,
@@ -378,7 +357,7 @@ int main(int argc, char **argv)
 
 	clock_gettime(CLOCK_MONOTONIC, &started);
 	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-		int threads_per_port = conf->num_tx_queues + conf->num_tx_queues;
+		int threads_per_port = conf->num_tx_queues + conf->num_rx_queues;
 		int i = p * threads_per_port + q;
 		if (p == conf->num_ports)
 			continue;
@@ -477,22 +456,27 @@ int main(int argc, char **argv)
 				tot_tx_pps += ptd_copy[q].num_tx_pkts - ptd_copy[q].old_tx_pkts;
 
 			} else {
-				pps = ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
-				printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
-					   ptd_copy[q].port, ptd_copy[q].queue,
-					   ptd_copy[q].num_rx_pkts,
-					   pps,
-					   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
+				if (ptd_copy[q].num_rx_pkts) {
+					pps = ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+					printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
+						   ptd_copy[q].port, ptd_copy[q].queue,
+						   ptd_copy[q].num_rx_pkts,
+						   pps,
+						   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
 
-				printf("Port %u queue %u avg latency    : %15lu (%lu ns), max: (%lu ns), min: (%lu ns)\n",
-					   ptd_copy[q].port, ptd_copy[q].queue,
-					   ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
-					   TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts),
-					   TICKS_TO_NSEC(ptd_copy[q].latency_max_interval),
-					   TICKS_TO_NSEC(ptd_copy[q].latency_min_interval));
+					printf("Port %u queue %u avg latency    : %15lu (%lu ns), max: (%lu ns), min: (%lu ns)\n",
+						   ptd_copy[q].port, ptd_copy[q].queue,
+						   ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
+						   TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts),
+						   TICKS_TO_NSEC(ptd_copy[q].latency_max_interval),
+						   TICKS_TO_NSEC(ptd_copy[q].latency_min_interval));
 
-				tot_rx_pkts += ptd_copy[q].num_rx_pkts;
-				tot_rx_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+					tot_rx_pkts += ptd_copy[q].num_rx_pkts;
+					tot_rx_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+				} else {
+					printf("Port %u queue %u rx pkts        : No packets received\n",
+						   ptd_copy[q].port, ptd_copy[q].queue);
+				}
 			}
 		}
 		printf("%-30s: %15lu (%lu pps)\n", "Total Tx pkts", tot_tx_pkts, tot_tx_pps);
