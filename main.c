@@ -193,10 +193,20 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 			last_run_tsc = tsc;
 			struct rte_mbuf *pkt;
 			pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+			if (unlikely(pkt == NULL))
+			{
+				continue;
+			}
+
 			uint64_t  * payload = craft_packet(ptd, pkt);
 			//hexdump(rte_pktmbuf_mtod_offset(pkt, void *, 0), ptd->pkt_len);
 			*payload = rte_rdtsc_precise();
-			rte_eth_tx_burst(ptd->port, 0, &pkt, 1);
+
+			if (unlikely(!rte_eth_tx_burst(ptd->port, ptd->queue, &pkt, 1))) {/* packet was not sent */
+				rte_pktmbuf_free(pkt);
+				continue;
+			}
+
 			ptd->num_tx_pkts ++;
 			ptd->num_tx_octets += ptd->pkt_len;
 		}
@@ -317,7 +327,7 @@ int main(int argc, char **argv)
 
 	for (p = 0; p < conf->num_ports; p++) {
 
-		ret = rte_eth_dev_configure(p, conf->num_rx_queues, 1, &port_conf);
+		ret = rte_eth_dev_configure(p, conf->num_rx_queues, conf->num_tx_queues, &port_conf);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_dev_configure:"
 								   " err=%d, port=%d\n", ret, p);
@@ -333,7 +343,7 @@ int main(int argc, char **argv)
 		rte_eth_dev_info_get(p, &dev_info);
 		txconf = &dev_info.default_txconf;
 		for (q = 0; q < conf->num_tx_queues; q++) {
-			ret = rte_eth_tx_queue_setup(p, 0, 512, socketid, txconf);
+			ret = rte_eth_tx_queue_setup(p, q, 512, socketid, txconf);
 			if (ret < 0)
 				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:"
 									   " err=%d, port=%d queue %d\n", ret, p, q);
@@ -503,7 +513,8 @@ int main(int argc, char **argv)
 
 		} else {
 			tot_rx_pkts += ptd[q].num_rx_pkts;
-			latency_avg += ptd[q].latency_sum/ptd[q].num_rx_pkts;
+			if (likely(ptd[q].num_rx_pkts))
+				latency_avg += ptd[q].latency_sum/ptd[q].num_rx_pkts;
 
 			if (latency_min > ptd[q].latency_min)
 				latency_min = ptd[q].latency_min;
