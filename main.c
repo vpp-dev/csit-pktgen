@@ -40,7 +40,7 @@ int ticks_per_usec = 1700;
 int should_quit = 0;
 volatile int rx_should_stop = 0; /* >0 to stop all rx threads */
 volatile int tx_should_stop = 0; /* >0 to stop all rx threads */
-struct timespec started, stopped;
+struct timespec started, actual;
 
 worker_barrier_t *b;
 static struct rte_mempool * pktmbuf_pool;
@@ -181,6 +181,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 	unsigned lcore_id;
 	per_thread_data_t * ptd = (per_thread_data_t *) arg;
 	uint64_t tsc, last_run_tsc = 0;
+	struct rte_mbuf *pkt = NULL;
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -189,27 +190,27 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 		tsc = ptd->last_tsc = rte_rdtsc_precise();
 
-		if (tsc > last_run_tsc + ticks_per_usec * 10) {
+//		if (tsc > last_run_tsc + ticks_per_usec * 10) {
 			last_run_tsc = tsc;
-			struct rte_mbuf *pkt;
-			pkt = rte_pktmbuf_alloc(pktmbuf_pool);
-			if (unlikely(pkt == NULL))
-			{
-				continue;
+
+			if (likely(pkt == NULL)) {
+				pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+				if (unlikely(pkt == NULL))
+					continue;
 			}
 
 			uint64_t  * payload = craft_packet(ptd, pkt);
 			//hexdump(rte_pktmbuf_mtod_offset(pkt, void *, 0), ptd->pkt_len);
 			*payload = rte_rdtsc_precise();
 
-			if (unlikely(!rte_eth_tx_burst(ptd->port, ptd->queue, &pkt, 1))) {/* packet was not sent */
-				rte_pktmbuf_free(pkt);
+			if (likely(rte_eth_tx_burst(ptd->port, ptd->queue, &pkt, 1))) {/* packet was not sent */
+				ptd->num_tx_pkts ++;
+				ptd->num_tx_octets += ptd->pkt_len;
+				pkt = NULL;
 				continue;
 			}
 
-			ptd->num_tx_pkts ++;
-			ptd->num_tx_octets += ptd->pkt_len;
-		}
+//		}
 	}
 
 	return 0;
@@ -436,8 +437,9 @@ int main(int argc, char **argv)
 		}
 
 		worker_barrier_release(b);
+		clock_gettime(CLOCK_MONOTONIC, &actual);
 
-		printf("\n==========\n");
+		printf("\n========== run time %lu sec ==========\n", clock_diff(started, actual)/1000);
 		printf("%-30s: %lu ticks (%lu ns)\n", "Barrier duration",
 			   worker_barrier_last_duration(b),
 			   TICKS_TO_NSEC(worker_barrier_last_duration(b)));
@@ -495,7 +497,7 @@ int main(int argc, char **argv)
 
 	printf("Stopping Tx threads and waiting for Rx threads to finish\n");
 	tx_should_stop = 1;
-	clock_gettime(CLOCK_MONOTONIC, &stopped);
+	clock_gettime(CLOCK_MONOTONIC, &actual);
 	usleep(100000);
 	rx_should_stop = 1;
 	rte_eal_mp_wait_lcore();
@@ -505,7 +507,7 @@ int main(int argc, char **argv)
 	uint64_t latency_avg = 0;
 	uint64_t latency_min = 0xffffffffffffffff;
 	uint64_t latency_max = 0;
-	uint64_t time_diff = clock_diff(started, stopped);
+	uint64_t time_diff = clock_diff(started, actual);
 
 	for (q = 0; q < num_threads; q++) {
 		if (ptd[q].type != THREAD_RX) {
