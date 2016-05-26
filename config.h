@@ -11,7 +11,8 @@ typedef struct {
 
 typedef struct {
 	int stats_interval;
-	int duration;
+	int duration; /* run time duration in sec */
+	int pps; /* number of transmitted packets per sec, 0 == no delay between packets */
 
 	int num_ports;
 	int num_tx_queues;

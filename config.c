@@ -10,6 +10,7 @@ static config_t conf;
 static config_t conf = {
 	.stats_interval = 3,
 	.duration = 0,
+	.pps = 0,
 
 	.num_ports = 2,
 	.num_tx_queues = 1,
@@ -29,6 +30,7 @@ static void print_usage(void)
 		   "  --help - this help\n"
 		   "  --stats-interval n - wait n seconds between printing statistics\n"
 		   "  --duration n - stop after n seconds\n"
+		   "  --pps n - transmit n packets per seconds\n"
 		   "\n"
 		   "  --src-ips - source IP addr\n"
 		   "  --dst-ips - destination IP addr\n"
@@ -46,7 +48,7 @@ int parse_cmdline(int argc, char **argv)
 {
 	int c;
 
-	enum {HELP, STATS_INTERVAL, DURATION, NUM_PORTS, NUM_TX_QUEUES, NUM_RX_QUEUES,
+	enum {HELP, STATS_INTERVAL, DURATION, PPS, NUM_PORTS, NUM_TX_QUEUES, NUM_RX_QUEUES,
 		  PACKET_SIZE, SRC_IPS, DST_IPS, DST_MACS};
 
 	while (1)
@@ -56,6 +58,7 @@ int parse_cmdline(int argc, char **argv)
 		{"help",          no_argument,       0, HELP},
 		{"stats-interval",required_argument, 0, STATS_INTERVAL},
 		{"duration",      required_argument, 0, DURATION},
+		{"pps",           required_argument, 0, PPS},
 
 		{"num-ports",     required_argument, 0, NUM_PORTS},
 		{"num-tx-queues", required_argument, 0, NUM_TX_QUEUES},
@@ -85,6 +88,10 @@ int parse_cmdline(int argc, char **argv)
 
 		case DURATION:
 			conf.duration = atoi(optarg);
+			break;
+
+		case PPS:
+			conf.pps = atoi(optarg);
 			break;
 
 		case NUM_PORTS:

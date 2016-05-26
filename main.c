@@ -116,6 +116,7 @@ typedef struct {
 	uint32_t dst_ip4;
 	uint16_t src_port;
 	uint16_t dst_port;
+	uint32_t pps; /* packets per second */
 
 	/* stats */
 	uint64_t num_tx_pkts;
@@ -190,27 +191,26 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 		tsc = ptd->last_tsc = rte_rdtsc_precise();
 
-//		if (tsc > last_run_tsc + ticks_per_usec * 10) {
-			last_run_tsc = tsc;
-
-			if (likely(pkt == NULL)) {
-				pkt = rte_pktmbuf_alloc(pktmbuf_pool);
-				if (unlikely(pkt == NULL))
-					continue;
-			}
-
-			uint64_t  * payload = craft_packet(ptd, pkt);
-			//hexdump(rte_pktmbuf_mtod_offset(pkt, void *, 0), ptd->pkt_len);
-			*payload = rte_rdtsc_precise();
-
-			if (likely(rte_eth_tx_burst(ptd->port, ptd->queue, &pkt, 1))) {/* packet was not sent */
-				ptd->num_tx_pkts ++;
-				ptd->num_tx_octets += ptd->pkt_len;
-				pkt = NULL;
+		if(unlikely(ptd->pps))
+			if (tsc < last_run_tsc + (1000000 / ptd->pps) * ticks_per_usec)
 				continue;
-			}
+		last_run_tsc = tsc;
 
-//		}
+		if (likely(pkt == NULL)) {
+			pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+			if (unlikely(pkt == NULL))
+				continue;
+		}
+
+		uint64_t  * payload = craft_packet(ptd, pkt);
+		//hexdump(rte_pktmbuf_mtod_offset(pkt, void *, 0), ptd->pkt_len);
+		*payload = rte_rdtsc_precise();
+
+		if (likely(rte_eth_tx_burst(ptd->port, ptd->queue, &pkt, 1))) { /* packet was sent */
+			ptd->num_tx_pkts ++;
+			ptd->num_tx_octets += ptd->pkt_len;
+			pkt = NULL;
+		}
 	}
 
 	return 0;
@@ -377,6 +377,7 @@ int main(int argc, char **argv)
 		ptd[i].lcore_id = lcore_id;
 
 		if (q < conf->num_tx_queues) {
+			ptd[i].pps = conf->pps / conf->num_tx_queues;
 			ptd[i].queue = q;
 			ptd[i].type = THREAD_TX;
 			rte_eth_macaddr_get (p, &ptd[i].src_mac);
@@ -462,7 +463,7 @@ int main(int argc, char **argv)
 				printf("Port %u queue %u tx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
 					   ptd_copy[q].port, ptd_copy[q].queue,
 					   ptd_copy[q].num_tx_pkts,
-					   pps,
+					   pps / conf->stats_interval,
 					   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
 				tot_tx_pkts += ptd_copy[q].num_tx_pkts;
 				tot_tx_pps += ptd_copy[q].num_tx_pkts - ptd_copy[q].old_tx_pkts;
@@ -473,7 +474,7 @@ int main(int argc, char **argv)
 					printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
 						   ptd_copy[q].port, ptd_copy[q].queue,
 						   ptd_copy[q].num_rx_pkts,
-						   pps,
+						   pps / conf->stats_interval,
 						   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
 
 					printf("Port %u queue %u avg latency    : %15lu (%lu ns), max: (%lu ns), min: (%lu ns)\n",
