@@ -70,8 +70,6 @@ hexdump(uint8_t buffer[], int len)
 	printf("[%s]\n", s);
 }
 
-static uint8_t broadcast_addr[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
 		.mq_mode = ETH_MQ_RX_RSS,
@@ -397,8 +395,23 @@ int main(int argc, char **argv)
 			ptd[i].pts = conf->pts / conf->num_tx_queues;
 			ptd[i].queue = q;
 			ptd[i].type = THREAD_TX;
-			rte_eth_macaddr_get (p, &ptd[i].src_mac);
-			rte_memcpy(&ptd[i].dst_mac, broadcast_addr, 6);
+			if (p == 0) {
+				if (!conf->macs_are_set) { /* macs was not set - use hardware macs */
+					rte_eth_macaddr_get (0, &ptd[i].src_mac);
+					rte_eth_macaddr_get (1, &ptd[i].dst_mac);
+				} else {
+					rte_memcpy(&ptd[i].src_mac, (const void *)&conf->mac[0], 6);
+					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->mac[1], 6);
+				}
+			} else {
+				if (!conf->macs_are_set) { /* macs was not set - use hardware macs */
+					rte_eth_macaddr_get (1, &ptd[i].src_mac);
+					rte_eth_macaddr_get (0, &ptd[i].dst_mac);
+				} else {
+					rte_memcpy(&ptd[i].src_mac, (const void *)&conf->mac[1], 6);
+					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->mac[0], 6);
+				}
+			}
 			ptd[i].src_ip4 = IPv4(172, 16, p+1, 2);
 			ptd[i].dst_ip4 = IPv4(172, 16, p+1, 1);
 			ptd[i].src_port = 1024 + p*16 + q;

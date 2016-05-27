@@ -20,6 +20,9 @@ typedef struct {
 	int num_rx_queues;
 
 	int packet_size;
+	int macs_are_set;
+	mac_t mac[2];
+
 } config_t;
 
 int parse_cmdline(int argc, char **argv);
