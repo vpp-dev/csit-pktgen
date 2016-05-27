@@ -40,6 +40,7 @@ int ticks_per_usec = 1700;
 int should_quit = 0;
 volatile int rx_should_stop = 0; /* >0 to stop all rx threads */
 volatile int tx_should_stop = 0; /* >0 to stop all rx threads */
+volatile int tx_threads_stopped = 0; /* number of stopped tx threads */
 struct timespec started, actual;
 
 worker_barrier_t *b;
@@ -117,6 +118,7 @@ typedef struct {
 	uint16_t src_port;
 	uint16_t dst_port;
 	uint32_t pps; /* packets per second */
+	uint32_t pts; /* number of packets to send by this thread */
 
 	/* stats */
 	uint64_t num_tx_pkts;
@@ -194,13 +196,14 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 		if(unlikely(ptd->pps))
 			if (tsc < last_run_tsc + (1000000 / ptd->pps) * ticks_per_usec)
 				continue;
-		last_run_tsc = tsc;
 
 		if (likely(pkt == NULL)) {
 			pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 			if (unlikely(pkt == NULL))
 				continue;
 		}
+
+		last_run_tsc = tsc;
 
 		uint64_t  * payload = craft_packet(ptd, pkt);
 		//hexdump(rte_pktmbuf_mtod_offset(pkt, void *, 0), ptd->pkt_len);
@@ -211,6 +214,19 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 			ptd->num_tx_octets += ptd->pkt_len;
 			pkt = NULL;
 		}
+
+		if(unlikely(ptd->pts)) {
+			if (ptd->pts == ptd->num_tx_pkts) {
+				if (pkt)
+					rte_pktmbuf_free(pkt);
+				__sync_fetch_and_add(&tx_threads_stopped,  1);
+				break;
+			}
+		}
+	}
+
+	if (tx_threads_stopped == conf->num_tx_queues * conf->num_ports) { /* this was the last thread */
+		kill(0, SIGALRM);
 	}
 
 	return 0;
@@ -378,6 +394,7 @@ int main(int argc, char **argv)
 
 		if (q < conf->num_tx_queues) {
 			ptd[i].pps = conf->pps / conf->num_tx_queues;
+			ptd[i].pts = conf->pts / conf->num_tx_queues;
 			ptd[i].queue = q;
 			ptd[i].type = THREAD_TX;
 			rte_eth_macaddr_get (p, &ptd[i].src_mac);
