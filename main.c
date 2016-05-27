@@ -536,6 +536,11 @@ int main(int argc, char **argv)
 			if (likely(ptd[q].num_rx_pkts))
 				latency_avg += ptd[q].latency_sum/ptd[q].num_rx_pkts;
 
+			if (ptd[q].latency_min_interval < ptd[q].latency_min)
+				ptd[q].latency_min = ptd[q].latency_min_interval;
+			if (ptd[q].latency_max_interval > ptd[q].latency_max)
+				ptd[q].latency_max = ptd[q].latency_max_interval;
+
 			if (latency_min > ptd[q].latency_min)
 				latency_min = ptd[q].latency_min;
 			if (latency_max < ptd[q].latency_max)
@@ -549,7 +554,7 @@ int main(int argc, char **argv)
 		   (int)((tot_tx_pkts - tot_rx_pkts) * 100 / tot_tx_pkts),
 		   time_diff);
 
-	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu\n",
+	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns\n",
 		   ((tot_tx_pkts + tot_rx_pkts) * conf->packet_size * 8 / time_diff),
 		   TICKS_TO_NSEC(latency_min),
 		   TICKS_TO_NSEC(latency_avg/(conf->num_ports * conf->num_rx_queues)),
