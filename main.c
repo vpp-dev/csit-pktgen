@@ -312,7 +312,7 @@ int main(int argc, char **argv)
 	int num_threads;
 
 	for (i=0; i<argc; i++)
-		if (!strncmp(argv[i], "--", 2))
+		if ((!strncmp(argv[i], "--", 2)) && (strlen(argv[i]) == 2))
 			break;
 
 	parse_cmdline(argc-i, &argv[i]); /* parameters after "--" are for pktgen */
@@ -412,11 +412,12 @@ int main(int argc, char **argv)
 					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->mac[0], 6);
 				}
 			}
-			ptd[i].src_ip4 = IPv4(172, 16, p+1, 2);
-			ptd[i].dst_ip4 = IPv4(172, 16, p+1, 1);
-			ptd[i].src_port = 1024 + p*16 + q;
-			ptd[i].dst_port = 2048 + p*16 + q;
+			ptd[i].src_ip4 = conf->src_ips[p];
+			ptd[i].dst_ip4 = conf->dst_ips[p];
+			ptd[i].src_port = conf->src_port;
+			ptd[i].dst_port = conf->dst_port;
 			ptd[i].pkt_len = conf->packet_size;
+
 			rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
 		} else {
 			ptd[i].queue = q - conf->num_tx_queues;

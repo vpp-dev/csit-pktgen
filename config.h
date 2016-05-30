@@ -23,6 +23,11 @@ typedef struct {
 	int macs_are_set;
 	mac_t mac[2];
 
+	uint32_t src_ips[2];
+	uint32_t dst_ips[2];
+	uint16_t src_port;
+	uint16_t dst_port;
+
 } config_t;
 
 int parse_cmdline(int argc, char **argv);

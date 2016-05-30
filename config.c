@@ -5,6 +5,8 @@
 #include <ctype.h>
 #include <getopt.h>
 
+#include <rte_ip.h>
+
 #include "config.h"
 
 static config_t conf;
@@ -22,6 +24,12 @@ static config_t conf = {
 
 	.packet_size = 64,
 	.macs_are_set = 0,
+
+	.src_ips = {IPv4(172, 16, 0, 1), IPv4(172, 16, 1, 1)},
+	.dst_ips = {IPv4(172, 16, 0, 2), IPv4(172, 16, 1, 2)},
+	.src_port = 1024,
+	.dst_port = 2048,
+
 };
 
 config_t *get_config(void)
@@ -33,16 +41,16 @@ static void print_usage(void)
 {
 	printf("usage:\ncsit-pktgen [dpdk-args] -- [pktgen args]\n\n"
 		   "  --help - this help\n"
-		   "  --stats-interval n - wait n seconds between printing statistics\n"
+		   "  --stats-interval [n] - wait [n] seconds between printing statistics\n"
 		   "  --duration n - stop after n seconds\n"
-		   "  --pps n - transmit n packets per seconds\n"
-		   "  --pts n - quit after transmitting n packets (on all directions)\n"
+		   "  --pps [n] - transmit [n] packets per seconds\n"
+		   "  --pts [n] - quit after transmitting [n] packets (on all directions)\n"
 		   "\n"
-		   "  --src-ips - source IP addr\n"
-		   "  --dst-ips - destination IP addr\n"
-		   "  --dst-macs - mac addr\n"
-		   "  --packet-size - packet size in bytes including header\n"
-		   "  --dst-macs - set MAC addrs for ethernet ports\n"
+		   "  --packet-size [n] - packet size in [n] bytes including header\n"
+		   "  --src-ips [a,b] - source IP addr\n"
+		   "  --dst-ips [a,b] - destination IP addr\n"
+		   "  --udp-ports [a,b] - udp ports used for communication\n"
+		   "  --dst-macs [a,b] - set MAC addrs for ethernet ports\n"
 		   "\n"
 		   "  --num-ports - number of physical ethernet port used\n"
 		   "  --num-tx-queues - number of transmit processing threads\n"
@@ -92,12 +100,45 @@ static int parse_macs(char *str)
 	return 1;
 }
 
+static int parse_ips(char *str, uint32_t *ips)
+{
+	char *separator = strchr(str,',');
+
+	if (separator == NULL)
+		return 1;
+
+	*separator = 0;
+
+	if (!inet_aton(str, (struct in_addr *)&ips[0]))
+		return 1;
+
+	if (!inet_aton(separator+1, (struct in_addr *)&ips[1]))
+		return 1;
+
+	ips[0] = ntohl(ips[0]);
+	ips[1] = ntohl(ips[1]);
+
+	return 0;
+}
+
+static int parse_ports(char *str, uint16_t *src, uint16_t *dst)
+{
+	int a, b;
+
+	if (sscanf(str, "%i,%i", &a, &b) != 2)
+		return 1;
+
+	*src = a & 0xffff;
+	*dst = b & 0xffff;
+	return 0;
+}
+
 int parse_cmdline(int argc, char **argv)
 {
 	int c;
 
 	enum {HELP, STATS_INTERVAL, DURATION, PPS, PTS, NUM_PORTS, NUM_TX_QUEUES, NUM_RX_QUEUES,
-		  PACKET_SIZE, SRC_IPS, DST_IPS, DST_MACS};
+		  PACKET_SIZE, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS};
 
 	while (1)
 	{
@@ -116,6 +157,7 @@ int parse_cmdline(int argc, char **argv)
 		{"packet-size",   required_argument, 0, PACKET_SIZE},
 		{"src-ips",       required_argument, 0, SRC_IPS},
 		{"dst-ips",       required_argument, 0, DST_IPS},
+		{"udp-ports",     required_argument, 0, UDP_PORTS},
 		{"dst-macs",      required_argument, 0, DST_MACS},
 
 		{0, 0, 0, 0}};
@@ -170,8 +212,20 @@ int parse_cmdline(int argc, char **argv)
 			break;
 
 		case SRC_IPS:
-//			conf.src_ips[0] = inet_addr(optarg);
+			if (parse_ips(optarg, &conf.src_ips[0]))
+				die("parameters for --src-ips are invalid (\"%s\")", optarg);
 			break;
+
+		case DST_IPS:
+			if (parse_ips(optarg, &conf.dst_ips[0]))
+				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
+			break;
+
+		case UDP_PORTS:
+			if (parse_ports(optarg, &conf.src_port, &conf.dst_port))
+				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
+			break;
+
 		}
 	}
 
