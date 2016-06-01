@@ -21,10 +21,13 @@ typedef struct {
 
 	int packet_size;
 	int macs_are_set;
+	int ipv6;
 	mac_t mac[2];
 
-	uint32_t src_ips[2];
-	uint32_t dst_ips[2];
+	uint32_t src_ip4[2];
+	uint32_t dst_ip4[2];
+	uint8_t  src_ip6[32];
+	uint8_t  dst_ip6[32];
 	uint16_t src_port;
 	uint16_t dst_port;
 

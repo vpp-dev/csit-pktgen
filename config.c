@@ -8,6 +8,9 @@
 #include <rte_ip.h>
 
 #include "config.h"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
 
 static config_t conf;
 
@@ -24,9 +27,10 @@ static config_t conf = {
 
 	.packet_size = 64,
 	.macs_are_set = 0,
+	.ipv6 = 0,
 
-	.src_ips = {IPv4(172, 16, 0, 1), IPv4(172, 16, 1, 1)},
-	.dst_ips = {IPv4(172, 16, 0, 2), IPv4(172, 16, 1, 2)},
+	.src_ip4 = {IPv4(172, 16, 0, 1), IPv4(172, 16, 1, 1)},
+	.dst_ip4 = {IPv4(172, 16, 0, 2), IPv4(172, 16, 1, 2)},
 	.src_port = 1024,
 	.dst_port = 2048,
 
@@ -46,6 +50,7 @@ static void print_usage(void)
 		   "  --pps [n] - transmit [n] packets per seconds\n"
 		   "  --pts [n] - quit after transmitting [n] packets (on all directions)\n"
 		   "\n"
+		   "  --ipv6 - use ipv6 instead of ipv4\n"
 		   "  --packet-size [n] - packet size in [n] bytes including header\n"
 		   "  --src-ips [a,b] - source IP addr\n"
 		   "  --dst-ips [a,b] - destination IP addr\n"
@@ -100,8 +105,10 @@ static int parse_macs(char *str)
 	return 1;
 }
 
-static int parse_ips(char *str, uint32_t *ips)
+static int parse_ips(char *str, int src_dst)
 {
+	struct addrinfo hint, *res = NULL;
+	int ret, is_ipv4;
 	char *separator = strchr(str,',');
 
 	if (separator == NULL)
@@ -109,15 +116,48 @@ static int parse_ips(char *str, uint32_t *ips)
 
 	*separator = 0;
 
-	if (!inet_aton(str, (struct in_addr *)&ips[0]))
+	memset(&hint, '\0', sizeof hint);
+	hint.ai_family = PF_UNSPEC;
+	hint.ai_flags = AI_NUMERICHOST;
+
+	ret = getaddrinfo(str, NULL, &hint, &res);
+	if (ret)
 		return 1;
 
-	if (!inet_aton(separator+1, (struct in_addr *)&ips[1]))
-		return 1;
+	is_ipv4 = (res->ai_family == AF_INET) ? 1 : 0;
+	freeaddrinfo(res);
 
-	ips[0] = ntohl(ips[0]);
-	ips[1] = ntohl(ips[1]);
+	if (src_dst == 1) { // source IP addr
+		if (is_ipv4) {
+			if (!inet_pton(AF_INET, str, (struct in_addr *)&conf.src_ip4[0]))
+				return 1;
+			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&conf.src_ip4[1]))
+				return 1;
+			conf.src_ip4[0] = ntohl(conf.src_ip4[0]);
+			conf.src_ip4[1] = ntohl(conf.src_ip4[1]);
+		} else {
+			if (!inet_pton(AF_INET6, str, &conf.src_ip6))
+				return 1;
+			if (!inet_pton(AF_INET6, separator+1, &conf.src_ip6[16]))
+				return 1;
+		}
 
+	} else { // destination IP addr
+		if (is_ipv4) {
+			if (!inet_pton(AF_INET, str, (struct in_addr *)&conf.dst_ip4[0]))
+				return 1;
+			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&conf.dst_ip4[1]))
+				return 1;
+			conf.dst_ip4[0] = ntohl(conf.dst_ip4[0]);
+			conf.dst_ip4[1] = ntohl(conf.dst_ip4[1]);
+		} else {
+			if (!inet_pton(AF_INET6, str, &conf.dst_ip6))
+				return 1;
+			if (!inet_pton(AF_INET6, separator+1, &conf.dst_ip6[16]))
+				return 1;
+		}
+
+	}
 	return 0;
 }
 
@@ -138,7 +178,7 @@ int parse_cmdline(int argc, char **argv)
 	int c;
 
 	enum {HELP, STATS_INTERVAL, DURATION, PPS, PTS, NUM_PORTS, NUM_TX_QUEUES, NUM_RX_QUEUES,
-		  PACKET_SIZE, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS};
+		  PACKET_SIZE, IPV6, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS};
 
 	while (1)
 	{
@@ -155,6 +195,7 @@ int parse_cmdline(int argc, char **argv)
 		{"num-rx-queues", required_argument, 0, NUM_RX_QUEUES},
 
 		{"packet-size",   required_argument, 0, PACKET_SIZE},
+		{"ipv6",          no_argument,       0, IPV6},
 		{"src-ips",       required_argument, 0, SRC_IPS},
 		{"dst-ips",       required_argument, 0, DST_IPS},
 		{"udp-ports",     required_argument, 0, UDP_PORTS},
@@ -212,18 +253,22 @@ int parse_cmdline(int argc, char **argv)
 			break;
 
 		case SRC_IPS:
-			if (parse_ips(optarg, &conf.src_ips[0]))
+			if (parse_ips(optarg, 1))
 				die("parameters for --src-ips are invalid (\"%s\")", optarg);
 			break;
 
 		case DST_IPS:
-			if (parse_ips(optarg, &conf.dst_ips[0]))
+			if (parse_ips(optarg, 2))
 				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
 			break;
 
 		case UDP_PORTS:
 			if (parse_ports(optarg, &conf.src_port, &conf.dst_port))
 				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
+			break;
+
+		case IPV6:
+			conf.ipv6 = 1;
 			break;
 
 		}

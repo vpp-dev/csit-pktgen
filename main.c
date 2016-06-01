@@ -113,6 +113,8 @@ typedef struct {
 	struct ether_addr dst_mac;
 	uint32_t src_ip4;
 	uint32_t dst_ip4;
+	uint32_t src_ip6[16];
+	uint32_t dst_ip6[16];
 	uint16_t src_port;
 	uint16_t dst_port;
 	uint32_t pps; /* packets per second */
@@ -134,8 +136,39 @@ typedef struct {
 	uint64_t latency_max_interval;
 } per_thread_data_t;
 
+typedef struct {
+	uint64_t tsc; // time stamp counter
+} packet_payload;
+
+
+static inline void
+calculate_checksum(struct rte_mbuf *pkt)
+{
+	struct ether_hdr * eth;
+	struct ipv4_hdr * ip4;
+	struct ipv6_hdr * ip6;
+	struct udp_hdr * udp;
+
+	eth = rte_pktmbuf_mtod_offset(pkt, struct ether_hdr *, 0);
+
+	if (eth->ether_type == rte_cpu_to_be_16(ETHER_TYPE_IPv4))
+	{
+		ip4 = rte_pktmbuf_mtod_offset(pkt, struct ipv4_hdr *, sizeof(*eth));
+		udp = rte_pktmbuf_mtod_offset(pkt, struct udp_hdr *, sizeof(*eth)+sizeof(*ip4));
+		ip4->hdr_checksum = rte_ipv4_cksum(ip4);
+		udp->dgram_cksum = rte_ipv4_udptcp_cksum(ip4, udp);
+	}
+
+	if (eth->ether_type == rte_cpu_to_be_16(ETHER_TYPE_IPv6))
+	{
+		ip6 = rte_pktmbuf_mtod_offset(pkt, struct ipv6_hdr *, sizeof(*eth));
+		udp = rte_pktmbuf_mtod_offset(pkt, struct udp_hdr *, sizeof(*eth)+sizeof(*ip6));
+		udp->dgram_cksum = rte_ipv6_udptcp_cksum(ip6, udp);
+	}
+}
+
 static inline void *
-craft_packet(per_thread_data_t * ptd, struct rte_mbuf *pkt)
+craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 {
 	struct ether_hdr * eth;
 	struct ipv4_hdr * ip4;
@@ -165,12 +198,50 @@ craft_packet(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	ip4->total_length   = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth));
 	ip4->src_addr = rte_cpu_to_be_32(ptd->src_ip4);
 	ip4->dst_addr = rte_cpu_to_be_32(ptd->dst_ip4);
-	ip4->hdr_checksum = rte_ipv4_cksum(ip4);
+	ip4->hdr_checksum = 0;
 
 	/* UDP */
 	udp->src_port = rte_cpu_to_be_16(ptd->src_port);
 	udp->dst_port = rte_cpu_to_be_16(ptd->dst_port);
 	udp->dgram_len = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth) - sizeof(*ip4));
+	udp->dgram_cksum = 0;
+
+	return (udp+1);
+}
+
+static inline void *
+craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
+{
+	struct ether_hdr * eth;
+	struct ipv6_hdr * ip6;
+	struct udp_hdr * udp;
+	eth = rte_pktmbuf_mtod_offset(pkt, struct ether_hdr *, 0);
+	ip6 = rte_pktmbuf_mtod_offset(pkt, struct ipv6_hdr *, sizeof(*eth));
+	udp = rte_pktmbuf_mtod_offset(pkt, struct udp_hdr *, sizeof(*eth)+sizeof(*ip6));
+
+	/* Metadata */
+	pkt->next = 0;
+	pkt->nb_segs = 1;
+	rte_pktmbuf_data_len (pkt) = ptd->pkt_len;
+	rte_pktmbuf_pkt_len (pkt) = ptd->pkt_len;
+
+	/* Ethernet */
+	ether_addr_copy(&ptd->src_mac, &eth->s_addr);
+	ether_addr_copy(&ptd->dst_mac, &eth->d_addr);
+	eth->ether_type = rte_cpu_to_be_16(ETHER_TYPE_IPv6);
+
+	/* IPv6 */
+	ip6->proto = IPPROTO_UDP;
+	ip6->vtc_flow = rte_cpu_to_be_32(0x60000000);
+	ip6->hop_limits = 64;
+	ip6->payload_len = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth) - sizeof(*ip6));
+	memcpy(ip6->src_addr, ptd->src_ip6, 16);
+	memcpy(ip6->dst_addr, ptd->dst_ip6, 16);
+
+	/* UDP */
+	udp->src_port = rte_cpu_to_be_16(ptd->src_port);
+	udp->dst_port = rte_cpu_to_be_16(ptd->dst_port);
+	udp->dgram_len = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth) - sizeof(*ip6));
 	udp->dgram_cksum = 0;
 
 	return (udp+1);
@@ -183,6 +254,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 	per_thread_data_t * ptd = (per_thread_data_t *) arg;
 	uint64_t tsc, last_run_tsc = 0;
 	struct rte_mbuf *pkt = NULL;
+	packet_payload *payload;
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -203,9 +275,13 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 
 		last_run_tsc = tsc;
 
-		uint64_t  * payload = craft_packet(ptd, pkt);
-		//hexdump(rte_pktmbuf_mtod_offset(pkt, void *, 0), ptd->pkt_len);
-		*payload = rte_rdtsc_precise();
+		if (!conf->ipv6)
+			payload = craft_packet_ipv4(ptd, pkt);
+		else
+			payload = craft_packet_ipv6(ptd, pkt);
+
+		payload->tsc = rte_rdtsc_precise();
+		calculate_checksum(pkt);
 
 		if (likely(rte_eth_tx_burst(ptd->port, ptd->queue, &pkt, 1))) { /* packet was sent */
 			ptd->num_tx_pkts ++;
@@ -237,7 +313,9 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	int i;
 	unsigned lcore_id;
 	uint64_t latency;
+	uint16_t *eth_type;
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
+	packet_payload *payload;
 	per_thread_data_t * ptd = (per_thread_data_t *) arg;
 
 	lcore_id = rte_lcore_id();
@@ -250,18 +328,25 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 		ptd->last_tsc = rte_rdtsc_precise();
 		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, MAX_PKT_BURST);
-		uint64_t *tsc1, tsc2 = rte_rdtsc_precise();
+		uint64_t tsc2 = rte_rdtsc_precise();
 		if (!nb_rx)
 			continue;
 
 		ptd->num_rx_pkts += nb_rx;
 
 		for (i = 0; i < nb_rx; i++) {
-			tsc1 = rte_pktmbuf_mtod_offset(pkts[i], uint64_t *, 14+20+8);
+			eth_type = (uint16_t *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *, 12);
+			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6)
+				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
+					sizeof(struct ether_hdr)+sizeof(struct ipv6_hdr)+sizeof(struct udp_hdr));
+			else
+				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
+					sizeof(struct ether_hdr)+sizeof(struct ipv4_hdr)+sizeof(struct udp_hdr));
+
 			//printf("port %u queue %u tx_timestamp %lu rx_timestamp %lu delte %lu (%lu ns)\n",
 			//       ptd->port, ptd->queue, *tsc1, tsc2, tsc2-*tsc1, TICKS_TO_NSEC(tsc2-*tsc1));
 			//hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
-			latency = tsc2-*tsc1;
+			latency = tsc2-payload->tsc;
 
 			ptd->latency_sum += latency;
 			if (latency < ptd->latency_min_interval)
@@ -412,8 +497,11 @@ int main(int argc, char **argv)
 					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->mac[0], 6);
 				}
 			}
-			ptd[i].src_ip4 = conf->src_ips[p];
-			ptd[i].dst_ip4 = conf->dst_ips[p];
+			ptd[i].src_ip4 = conf->src_ip4[p];
+			ptd[i].dst_ip4 = conf->dst_ip4[p];
+			memcpy(ptd[i].src_ip6, &conf->src_ip6[p*16], 16);
+			memcpy(ptd[i].dst_ip6, &conf->dst_ip6[p*16], 16);
+
 			ptd[i].src_port = conf->src_port;
 			ptd[i].dst_port = conf->dst_port;
 			ptd[i].pkt_len = conf->packet_size;
