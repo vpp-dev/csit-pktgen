@@ -161,15 +161,41 @@ static int parse_ips(char *str, int src_dst)
 	return 0;
 }
 
-static int parse_ports(char *str, uint16_t *src, uint16_t *dst)
+#define TMPSIZE 64
+static int parse_ports(char *str)
 {
-	int a, b;
+	char port1[TMPSIZE], port2[TMPSIZE];
 
-	if (sscanf(str, "%i,%i", &a, &b) != 2)
+	if (strlen(str) > TMPSIZE)
 		return 1;
 
-	*src = a & 0xffff;
-	*dst = b & 0xffff;
+	if (sscanf(str, "%[^,],%s", port1, port2) != 2)
+		return 1;
+
+	if (!strncmp(port1, "random", 6)) {
+		conf.src_port = PORT_RANDOM;
+	} else if (port1[0] == '+') {
+		if (sscanf(port1+1, "%i", &conf.src_port) != 1)
+			return 1;
+		conf.src_port |= PORT_INCREMENT;
+	} else
+		if (sscanf(port1, "%i", &conf.src_port) != 1)
+		return 1;
+	else
+		conf.src_port &= 0xffff;
+
+	if (!strncmp(port2, "random", 6)) {
+		conf.dst_port = PORT_RANDOM;
+	} else if (port2[0] == '+') {
+		if (sscanf(port2+1, "%i", &conf.dst_port) != 1)
+			return 1;
+		conf.dst_port |= PORT_INCREMENT;
+	} else
+		if (sscanf(port2, "%i", &conf.dst_port) != 1)
+		return 1;
+	else
+		conf.dst_port &= 0xffff;
+
 	return 0;
 }
 
@@ -263,7 +289,7 @@ int parse_cmdline(int argc, char **argv)
 			break;
 
 		case UDP_PORTS:
-			if (parse_ports(optarg, &conf.src_port, &conf.dst_port))
+			if (parse_ports(optarg))
 				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
 			break;
 

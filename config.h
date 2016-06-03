@@ -5,6 +5,9 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#define PORT_INCREMENT (1<<16)
+#define PORT_RANDOM (1<<17)
+
 typedef struct {
 	unsigned char mac[6];
 } mac_t;
@@ -28,8 +31,8 @@ typedef struct {
 	uint32_t dst_ip4[2];
 	uint8_t  src_ip6[32];
 	uint8_t  dst_ip6[32];
-	uint16_t src_port;
-	uint16_t dst_port;
+	uint32_t src_port; /* bits 0-15=port, bit16=increment, bit17=random */
+	uint32_t dst_port;
 
 } config_t;
 

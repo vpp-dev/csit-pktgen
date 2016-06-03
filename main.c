@@ -115,8 +115,8 @@ typedef struct {
 	uint32_t dst_ip4;
 	uint32_t src_ip6[16];
 	uint32_t dst_ip6[16];
-	uint16_t src_port;
-	uint16_t dst_port;
+	uint32_t src_port;
+	uint32_t dst_port;
 	uint32_t pps; /* packets per second */
 	uint32_t pts; /* number of packets to send by this thread */
 
@@ -195,14 +195,40 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	ip4->time_to_live    = 64;
 	ip4->next_proto_id   = 17 /* UDP */;
 	ip4->packet_id       = 0;
-	ip4->total_length   = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth));
-	ip4->src_addr = rte_cpu_to_be_32(ptd->src_ip4);
-	ip4->dst_addr = rte_cpu_to_be_32(ptd->dst_ip4);
-	ip4->hdr_checksum = 0;
+	ip4->total_length    = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth));
+	ip4->src_addr        = rte_cpu_to_be_32(ptd->src_ip4);
+	ip4->dst_addr        = rte_cpu_to_be_32(ptd->dst_ip4);
+	ip4->hdr_checksum    = 0;
 
 	/* UDP */
-	udp->src_port = rte_cpu_to_be_16(ptd->src_port);
-	udp->dst_port = rte_cpu_to_be_16(ptd->dst_port);
+	switch(ptd->src_port & 0xffff0000) {
+	case PORT_RANDOM:
+		udp->src_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
+		break;
+	case PORT_INCREMENT:
+		if ((ptd->num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
+			ptd->src_port++;
+			ptd->src_port = ptd->src_port & 0xffff + PORT_INCREMENT;
+		}
+		// no break here
+	default:
+		udp->src_port = rte_cpu_to_be_16(ptd->src_port);
+	}
+
+	switch(ptd->dst_port & 0xffff0000) {
+	case PORT_RANDOM:
+		udp->dst_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
+		break;
+	case PORT_INCREMENT:
+		if ((ptd->num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
+			ptd->dst_port++;
+			ptd->dst_port = ptd->dst_port & 0xffff + PORT_INCREMENT;
+		}
+		// no break here
+	default:
+		udp->dst_port = rte_cpu_to_be_16(ptd->dst_port);
+	}
+
 	udp->dgram_len = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth) - sizeof(*ip4));
 	udp->dgram_cksum = 0;
 
@@ -239,8 +265,33 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	memcpy(ip6->dst_addr, ptd->dst_ip6, 16);
 
 	/* UDP */
-	udp->src_port = rte_cpu_to_be_16(ptd->src_port);
-	udp->dst_port = rte_cpu_to_be_16(ptd->dst_port);
+	switch(ptd->src_port & 0xffff0000) {
+	case PORT_RANDOM:
+		udp->src_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
+		break;
+	case PORT_INCREMENT:
+		if ((ptd->num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
+			ptd->src_port++;
+			ptd->src_port = ptd->src_port & 0xffff + PORT_INCREMENT;
+		}
+		// no break here
+	default:
+		udp->src_port = rte_cpu_to_be_16(ptd->src_port);
+	}
+
+	switch(ptd->dst_port & 0xffff0000) {
+	case PORT_RANDOM:
+		udp->dst_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
+		break;
+	case PORT_INCREMENT:
+		if ((ptd->num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
+			ptd->dst_port++;
+			ptd->dst_port = ptd->dst_port & 0xffff + PORT_INCREMENT;
+		}
+		// no break here
+	default:
+		udp->dst_port = rte_cpu_to_be_16(ptd->dst_port);
+	}
 	udp->dgram_len = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth) - sizeof(*ip6));
 	udp->dgram_cksum = 0;
 
@@ -258,6 +309,11 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
+
+	if (ptd->src_port & PORT_INCREMENT) /* start from zero*/
+		ptd->src_port &= 0xffff0000;
+	if (ptd->dst_port & PORT_INCREMENT) /* start from zero*/
+		ptd->dst_port &= 0xffff0000;
 
 	while(!tx_should_stop) {
 		worker_barrier_check(b);
