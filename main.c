@@ -208,7 +208,7 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	case PORT_INCREMENT:
 		if ((ptd->num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
 			ptd->src_port++;
-			ptd->src_port = ptd->src_port & 0xffff + PORT_INCREMENT;
+			ptd->src_port = (ptd->src_port & 0xffff) + PORT_INCREMENT;
 		}
 		// no break here
 	default:
@@ -222,7 +222,7 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	case PORT_INCREMENT:
 		if ((ptd->num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
 			ptd->dst_port++;
-			ptd->dst_port = ptd->dst_port & 0xffff + PORT_INCREMENT;
+			ptd->dst_port = (ptd->dst_port & 0xffff) + PORT_INCREMENT;
 		}
 		// no break here
 	default:
@@ -272,7 +272,7 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	case PORT_INCREMENT:
 		if ((ptd->num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
 			ptd->src_port++;
-			ptd->src_port = ptd->src_port & 0xffff + PORT_INCREMENT;
+			ptd->src_port = (ptd->src_port & 0xffff) + PORT_INCREMENT;
 		}
 		// no break here
 	default:
@@ -286,7 +286,7 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	case PORT_INCREMENT:
 		if ((ptd->num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
 			ptd->dst_port++;
-			ptd->dst_port = ptd->dst_port & 0xffff + PORT_INCREMENT;
+			ptd->dst_port = (ptd->dst_port & 0xffff) + PORT_INCREMENT;
 		}
 		// no break here
 	default:
