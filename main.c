@@ -301,11 +301,14 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 static int
 lcore_tx_main(__attribute__((unused)) void *arg)
 {
+	int i;
 	unsigned lcore_id;
 	per_thread_data_t * ptd = (per_thread_data_t *) arg;
 	uint64_t tsc, last_run_tsc = 0;
-	struct rte_mbuf *pkt = NULL;
 	packet_payload *payload;
+	struct rte_mbuf *pkts[MAX_PKT_BURST];
+	int pkts_in_round = MAX_PKT_BURST;
+	int pkts_sent;
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -319,36 +322,41 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 		tsc = ptd->last_tsc = rte_rdtsc_precise();
 
-		if(unlikely(ptd->pps))
-			if (tsc < last_run_tsc + (1000000 / ptd->pps) * ticks_per_usec)
-				continue;
+		if(unlikely(ptd->pts)) {
+			pkts_in_round = ptd->pts - ptd->num_tx_pkts;
+			if (pkts_in_round > MAX_PKT_BURST)
+				pkts_in_round = MAX_PKT_BURST;
+		}
 
-		if (likely(pkt == NULL)) {
-			pkt = rte_pktmbuf_alloc(pktmbuf_pool);
-			if (unlikely(pkt == NULL))
+		if(unlikely(ptd->pps)) {
+			pkts_in_round = 1;
+			if (tsc < last_run_tsc + (1000000 / ptd->pps) * ticks_per_usec)
 				continue;
 		}
 
 		last_run_tsc = tsc;
 
-		if (!conf->ipv6)
-			payload = craft_packet_ipv4(ptd, pkt);
-		else
-			payload = craft_packet_ipv6(ptd, pkt);
+		for (i=0; i<pkts_in_round; i++) {
+			pkts[i] = rte_pktmbuf_alloc(pktmbuf_pool);
 
-		payload->tsc = rte_rdtsc_precise();
-		calculate_checksum(pkt);
+			if (!conf->ipv6)
+				payload = craft_packet_ipv4(ptd, pkts[i]);
+			else
+				payload = craft_packet_ipv6(ptd, pkts[i]);
 
-		if (likely(rte_eth_tx_burst(ptd->port, ptd->queue, &pkt, 1))) { /* packet was sent */
-			ptd->num_tx_pkts ++;
-			ptd->num_tx_octets += ptd->pkt_len;
-			pkt = NULL;
+			payload->tsc = rte_rdtsc_precise();
+			calculate_checksum(pkts[i]);
 		}
+
+		pkts_sent = rte_eth_tx_burst(ptd->port, ptd->queue, pkts, pkts_in_round);
+		ptd->num_tx_pkts += pkts_sent;
+		ptd->num_tx_octets += ptd->pkt_len * pkts_sent;
+
+		for (i=0; i<pkts_in_round; i++)
+			rte_pktmbuf_free(pkts[i]);
 
 		if(unlikely(ptd->pts)) {
 			if (ptd->pts == ptd->num_tx_pkts) {
-				if (pkt)
-					rte_pktmbuf_free(pkt);
 				__sync_fetch_and_add(&tx_threads_stopped,  1);
 				break;
 			}
@@ -558,8 +566,8 @@ int main(int argc, char **argv)
 			memcpy(ptd[i].src_ip6, &conf->src_ip6[p*16], 16);
 			memcpy(ptd[i].dst_ip6, &conf->dst_ip6[p*16], 16);
 
-			ptd[i].src_port = conf->src_port;
-			ptd[i].dst_port = conf->dst_port;
+			ptd[i].src_port = conf->src_port+q;
+			ptd[i].dst_port = conf->dst_port+q;
 			ptd[i].pkt_len = conf->packet_size;
 
 			rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
