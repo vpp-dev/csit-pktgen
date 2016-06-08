@@ -48,10 +48,10 @@ worker_barrier_release(worker_barrier_t *b)
 	b->t2 = rte_rdtsc_precise();
 }
 
-static uint64_t
-worker_barrier_last_duration(worker_barrier_t *b)
-{
-	return (b->t2 > b->t1) ? (b->t2 - b->t1) : 0;
-}
+// static uint64_t
+// worker_barrier_last_duration(worker_barrier_t *b)
+// {
+// 	return (b->t2 > b->t1) ? (b->t2 - b->t1) : 0;
+// }
 
 

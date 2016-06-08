@@ -5,22 +5,31 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#define PREAMBLE_SOF_GAP 20
+
 #define PORT_INCREMENT (1<<16)
 #define PORT_RANDOM (1<<17)
+
+/* csit-pktgen run mode */
+enum {BINSEARCH, DELAY, FIXRATE, LINSEARCH};
 
 typedef struct {
 	unsigned char mac[6];
 } mac_t;
 
+
 typedef struct {
+	int test;  /* [binsearch|delay|fixrate|linsearch] */
+
 	int stats_interval;
 	int duration; /* run time duration in sec */
-	int pps; /* number of transmitted packets per sec, 0 == no delay between packets */
+	uint64_t pps;  /* number of transmitted packets per sec, 0 == no delay between packets */
+	uint64_t rate; /* line rate in Bps */
 	int pts; /* quit after transmitting pts packets */
 
 	int num_ports;
 	int num_tx_queues;
-	int num_rx_queues;
+    int num_rx_queues;
 
 	int packet_size;
 	int macs_are_set;

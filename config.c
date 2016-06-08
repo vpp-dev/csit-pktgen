@@ -16,9 +16,12 @@ static config_t conf;
 
 /* default parameters */
 static config_t conf = {
+	.test = FIXRATE,
+
 	.stats_interval = 3,
 	.duration = 0,
 	.pps = 0,
+	.rate = 0,
 	.pts = 0,
 
 	.num_ports = 2,
@@ -199,11 +202,26 @@ static int parse_ports(char *str)
 	return 0;
 }
 
+#define dbg(str, ...) printf("CONFIG: "); printf(str, ##__VA_ARGS__);
+
+static void validate_configuration()
+{
+	if ((conf.rate) && (conf.pps))
+		die("Please select --rate OR --pps.");
+
+	if (conf.rate) { /* calculate line rate */
+		conf.pps = (conf.rate / 8) / (conf.packet_size);
+		dbg("Line rate: sending %lu pps with size %lu bytes\n",
+			(unsigned long)conf.pps,
+			(unsigned long)conf.packet_size);
+    }
+}
+
 int parse_cmdline(int argc, char **argv)
 {
 	int c;
 
-	enum {HELP, STATS_INTERVAL, DURATION, PPS, PTS, NUM_PORTS, NUM_TX_QUEUES, NUM_RX_QUEUES,
+	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES, NUM_RX_QUEUES,
 		  PACKET_SIZE, IPV6, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS};
 
 	while (1)
@@ -211,9 +229,11 @@ int parse_cmdline(int argc, char **argv)
 		int option_index = 0;
 		static struct option long_options[] = {
 		{"help",          no_argument,       0, HELP},
+		{"test",          required_argument, 0, TEST},
 		{"stats-interval",required_argument, 0, STATS_INTERVAL},
 		{"duration",      required_argument, 0, DURATION},
 		{"pps",           required_argument, 0, PPS},
+		{"rate",          required_argument, 0, RATE},
 		{"pts",           required_argument, 0, PTS},
 
 		{"num-ports",     required_argument, 0, NUM_PORTS},
@@ -241,6 +261,19 @@ int parse_cmdline(int argc, char **argv)
 			exit(0);
 			break;
 
+		case TEST:
+			if (!strcmp(optarg, "binsearch"))
+				conf.test = BINSEARCH;
+			else if (!strcmp(optarg, "delay"))
+				conf.test = DELAY;
+			else if (!strcmp(optarg, "fixrate"))
+				conf.test = FIXRATE;
+			else if (!strcmp(optarg, "linsearch"))
+				conf.test = LINSEARCH;
+			else
+				die("Unknown test \"%s\"", optarg);
+			break;
+			
 		case STATS_INTERVAL:
 			conf.stats_interval = verify_int(optarg);
 			break;
@@ -251,6 +284,10 @@ int parse_cmdline(int argc, char **argv)
 
 		case PPS:
 			conf.pps = verify_int(optarg);
+			break;
+
+		case RATE:
+			conf.rate = verify_int(optarg);
 			break;
 
 		case PTS:
@@ -299,6 +336,6 @@ int parse_cmdline(int argc, char **argv)
 
 		}
 	}
-
+	validate_configuration();
 	return 0;
 }

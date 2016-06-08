@@ -36,7 +36,8 @@
 config_t *conf = NULL;
 
 #define TICKS_TO_NSEC(x) ((x) * 1000 / ticks_per_usec)
-int ticks_per_usec = 1700;
+uint64_t ticks_per_sec;
+int ticks_per_usec;
 int should_quit = 0;
 volatile int rx_should_stop = 0; /* >0 to stop all rx threads */
 volatile int tx_should_stop = 0; /* >0 to stop all rx threads */
@@ -45,6 +46,7 @@ struct timespec started, actual;
 
 worker_barrier_t *b;
 static struct rte_mempool * pktmbuf_pool;
+
 
 static void __attribute__ ((unused))
 hexdump(uint8_t buffer[], int len)
@@ -100,6 +102,19 @@ typedef enum {
 } thread_type_t;
 
 typedef struct {
+	/* stats */
+	uint64_t num_tx_pkts;
+	uint64_t num_tx_octets;
+
+	uint64_t num_rx_pkts;
+	uint64_t num_rx_octets;
+
+	uint64_t latency_sum;
+	uint64_t latency_min; /* total latency */
+	uint64_t latency_max;
+} counters;
+
+typedef struct {
 	char cacheline0[0] __attribute__((aligned(2*64)));
 	int port;
 	int queue;
@@ -117,29 +132,18 @@ typedef struct {
 	uint32_t dst_ip6[16];
 	uint32_t src_port;
 	uint32_t dst_port;
-	uint32_t pps; /* packets per second */
-	uint32_t pts; /* number of packets to send by this thread */
+	uint64_t delay; /* delay between packets */
+	uint64_t pts; /* number of packets to send by this thread */
 
-	/* stats */
-	uint64_t num_tx_pkts;
-	uint64_t old_tx_pkts;
-	uint64_t num_tx_octets;
-	uint64_t num_rx_pkts;
-	uint64_t old_rx_pkts;
-	uint64_t num_rx_octets;
-	uint64_t last_tsc;
+	counters counters;
 
-	uint64_t latency_sum;
-	uint64_t latency_min; /* total latency */
-	uint64_t latency_max;
-	uint64_t latency_min_interval; /* per interval latency */
-	uint64_t latency_max_interval;
 } per_thread_data_t;
 
 typedef struct {
 	uint64_t tsc; // time stamp counter
 } packet_payload;
 
+counters rt_ctrs = {0};
 
 static inline void
 calculate_checksum(struct rte_mbuf *pkt)
@@ -206,7 +210,7 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->src_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
 			ptd->src_port++;
 			ptd->src_port = (ptd->src_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -220,7 +224,7 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->dst_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
 			ptd->dst_port++;
 			ptd->dst_port = (ptd->dst_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -270,7 +274,7 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->src_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
 			ptd->src_port++;
 			ptd->src_port = (ptd->src_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -284,7 +288,7 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->dst_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
 			ptd->dst_port++;
 			ptd->dst_port = (ptd->dst_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -309,6 +313,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
 	int pkts_in_round = MAX_PKT_BURST;
 	int pkts_sent;
+	int pts_present = 0;
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -320,20 +325,18 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 
 	while(!tx_should_stop) {
 		worker_barrier_check(b);
-		tsc = ptd->last_tsc = rte_rdtsc_precise();
+		tsc = rte_rdtsc_precise();
 
 		if(unlikely(ptd->pts)) {
-			pkts_in_round = ptd->pts - ptd->num_tx_pkts;
-			if (pkts_in_round > MAX_PKT_BURST)
-				pkts_in_round = MAX_PKT_BURST;
+			pts_present = 1;
+			pkts_in_round = (ptd->pts > MAX_PKT_BURST) ? MAX_PKT_BURST : ptd->pts;
 		}
 
-		if(unlikely(ptd->pps)) {
+		if(unlikely(ptd->delay)) {
 			pkts_in_round = 1;
-			if (tsc < last_run_tsc + (1000000 / ptd->pps) * ticks_per_usec)
+			if (tsc < (last_run_tsc + ptd->delay))
 				continue;
 		}
-
 		last_run_tsc = tsc;
 
 		for (i=0; i<pkts_in_round; i++) {
@@ -349,14 +352,15 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 		}
 
 		pkts_sent = rte_eth_tx_burst(ptd->port, ptd->queue, pkts, pkts_in_round);
-		ptd->num_tx_pkts += pkts_sent;
-		ptd->num_tx_octets += ptd->pkt_len * pkts_sent;
+		ptd->counters.num_tx_pkts += pkts_sent;
+		ptd->counters.num_tx_octets += ptd->pkt_len * pkts_sent;
 
 		for (i=0; i<pkts_in_round; i++)
 			rte_pktmbuf_free(pkts[i]);
 
-		if(unlikely(ptd->pts)) {
-			if (ptd->pts == ptd->num_tx_pkts) {
+		if(unlikely(pts_present)) {
+			ptd->pts -= pkts_sent;
+			if (!ptd->pts) {
 				__sync_fetch_and_add(&tx_threads_stopped,  1);
 				break;
 			}
@@ -385,18 +389,15 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
 
-	ptd->latency_min_interval = 0xffffffffffffffff;
-	ptd->latency_max_interval = 0;
-
 	while(!rx_should_stop) {
 		worker_barrier_check(b);
-		ptd->last_tsc = rte_rdtsc_precise();
+
 		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, MAX_PKT_BURST);
 		uint64_t tsc2 = rte_rdtsc_precise();
 		if (!nb_rx)
 			continue;
 
-		ptd->num_rx_pkts += nb_rx;
+		ptd->counters.num_rx_pkts += nb_rx;
 
 		for (i = 0; i < nb_rx; i++) {
 			eth_type = (uint16_t *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *, 12);
@@ -412,12 +413,13 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			//hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 			latency = tsc2-payload->tsc;
 
-			ptd->latency_sum += latency;
-			if (latency < ptd->latency_min_interval)
-				ptd->latency_min_interval = latency;
-			if (latency > ptd->latency_max_interval)
-				ptd->latency_max_interval = latency;
+			ptd->counters.latency_sum += latency;
+			if (latency < ptd->counters.latency_min)
+				ptd->counters.latency_min = latency;
+			if (latency > ptd->counters.latency_max)
+				ptd->counters.latency_max = latency;
 
+			ptd->counters.num_rx_octets += pkts[i]->pkt_len;
 			rte_pktmbuf_free(pkts[i]);
 		}
 	}
@@ -476,7 +478,8 @@ int main(int argc, char **argv)
 	signal(SIGINT, signal_stop);
 	signal(SIGALRM, signal_alarm);
 
-	ticks_per_usec = rte_get_tsc_hz()/1000000;
+	ticks_per_sec = rte_get_tsc_hz();
+	ticks_per_usec = ticks_per_sec/1000000;
 
 	pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool0", 32768,
 										   MEMPOOL_CACHE_SIZE, 0,
@@ -540,7 +543,7 @@ int main(int argc, char **argv)
 		ptd[i].lcore_id = lcore_id;
 
 		if (q < conf->num_tx_queues) {
-			ptd[i].pps = conf->pps / conf->num_tx_queues;
+			ptd[i].delay = ticks_per_sec / (conf->pps / conf->num_tx_queues);
 			ptd[i].pts = conf->pts / conf->num_tx_queues;
 			ptd[i].queue = q;
 			ptd[i].type = THREAD_TX;
@@ -574,8 +577,8 @@ int main(int argc, char **argv)
 		} else {
 			ptd[i].queue = q - conf->num_tx_queues;
 			ptd[i].type = THREAD_RX;
-			ptd[i].latency_min = 0xffffffffffffffff;
-			ptd[i].latency_max = 0;
+			ptd[i].counters.latency_min = 0xffffffffffffffff;
+			ptd[i].counters.latency_max = 0;
 			rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
 		}
 
@@ -588,16 +591,13 @@ int main(int argc, char **argv)
 
 	if (conf->duration)
 		alarm(conf->duration);
+	rt_ctrs.latency_min = 0xffffffffffffffff;
 
 	while (!should_quit) {
-		uint64_t tot_rx_pkts = 0;
-		uint64_t tot_rx_pps = 0;
+		uint64_t interval_rx_pkts = 0;
+		uint64_t interval_rx_pps = 0;
 		uint64_t tot_tx_pkts = 0;
 		uint64_t tot_tx_pps = 0;
-		uint64_t min_tsc = ~0;
-		uint64_t max_tsc = 0;
-		uint64_t pps;
-
 		sleep(conf->stats_interval);
 
 		if (should_quit)
@@ -607,76 +607,66 @@ int main(int argc, char **argv)
 		memcpy(ptd_copy, ptd, num_threads * sizeof(per_thread_data_t));
 
 		for (q = 0; q < num_threads; q++) {
-			/* save old values */
-			ptd[q].old_tx_pkts = ptd[q].num_tx_pkts;
-			ptd[q].old_rx_pkts = ptd[q].num_rx_pkts;
+			rt_ctrs.num_tx_octets += ptd[q].counters.num_tx_octets;
+			rt_ctrs.num_tx_pkts   += ptd[q].counters.num_tx_pkts;
+			rt_ctrs.num_rx_octets += ptd[q].counters.num_rx_octets;
+			rt_ctrs.num_rx_pkts   += ptd[q].counters.num_rx_pkts;
 
-			/* calculate max/min latency per life */
-			if (ptd[q].latency_min_interval < ptd[q].latency_min)
-				ptd[q].latency_min = ptd[q].latency_min_interval;
-			if (ptd[q].latency_max_interval > ptd[q].latency_max)
-				ptd[q].latency_max = ptd[q].latency_max_interval;
-			ptd[q].latency_min_interval = 0xffffffffffffffff;
-			ptd[q].latency_max_interval = 0;
+			if (ptd[q].type == THREAD_RX) {
+				rt_ctrs.latency_sum   += ptd[q].counters.latency_sum;
+				if (ptd[q].counters.latency_min < rt_ctrs.latency_min)
+					rt_ctrs.latency_min = ptd[q].counters.latency_min;
+				if (ptd[q].counters.latency_max > rt_ctrs.latency_max)
+					rt_ctrs.latency_max = ptd[q].counters.latency_max;
+			}
+
+			/* clear stats */
+			memset((void *)&ptd[q].counters, 0, sizeof(counters));
+
+			/* set min interval to maximum */
+			ptd[q].counters.latency_min = 0xffffffffffffffff;
 		}
 
 		worker_barrier_release(b);
 		clock_gettime(CLOCK_MONOTONIC, &actual);
 
 		printf("\n========== run time %lu sec ==========\n", clock_diff(started, actual)/1000);
-		printf("%-30s: %lu ticks (%lu ns)\n", "Barrier duration",
-			   worker_barrier_last_duration(b),
-			   TICKS_TO_NSEC(worker_barrier_last_duration(b)));
-
-		for (q = 0; q < num_threads; q++) {
-			if (ptd_copy[q].last_tsc < min_tsc)
-				min_tsc = ptd_copy[q].last_tsc;
-
-			if (ptd_copy[q].last_tsc > max_tsc)
-				max_tsc = ptd_copy[q].last_tsc;
-		}
-
-		printf("%-30s: %lu ticks (%lu ns)\n", "TSC drift",
-			   max_tsc - min_tsc, TICKS_TO_NSEC(max_tsc - min_tsc));
 
 		for (q = 0; q < num_threads; q++) {
 
 			if (ptd_copy[q].type != THREAD_RX) {
-				pps = ptd_copy[q].num_tx_pkts - ptd_copy[q].old_tx_pkts;
 				printf("Port %u queue %u tx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
-					   ptd_copy[q].port, ptd_copy[q].queue,
-					   ptd_copy[q].num_tx_pkts,
-					   pps / conf->stats_interval,
-					   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
-				tot_tx_pkts += ptd_copy[q].num_tx_pkts;
-				tot_tx_pps += ptd_copy[q].num_tx_pkts - ptd_copy[q].old_tx_pkts;
+						ptd_copy[q].port, ptd_copy[q].queue,
+						ptd_copy[q].counters.num_tx_pkts,
+						ptd_copy[q].counters.num_tx_pkts / conf->stats_interval,
+						ptd_copy[q].counters.num_tx_octets * 8 / (conf->stats_interval*1000));
 
+				tot_tx_pkts += ptd_copy[q].counters.num_tx_pkts;
+				tot_tx_pps += ptd_copy[q].counters.num_tx_pkts;
 			} else {
-				if (ptd_copy[q].num_rx_pkts) {
-					pps = ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+				if (ptd_copy[q].counters.num_rx_pkts) {
 					printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
-						   ptd_copy[q].port, ptd_copy[q].queue,
-						   ptd_copy[q].num_rx_pkts,
-						   pps / conf->stats_interval,
-						   pps * conf->packet_size * 8 / (conf->stats_interval*1000));
+							ptd_copy[q].port, ptd_copy[q].queue,
+							ptd_copy[q].counters.num_rx_pkts,
+							ptd_copy[q].counters.num_rx_pkts / conf->stats_interval,
+							ptd_copy[q].counters.num_rx_octets * 8 / (conf->stats_interval*1000));
 
-					printf("Port %u queue %u avg latency    : %15lu (%lu ns), max: (%lu ns), min: (%lu ns)\n",
-						   ptd_copy[q].port, ptd_copy[q].queue,
-						   ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts,
-						   TICKS_TO_NSEC(ptd_copy[q].latency_sum/ptd_copy[q].num_rx_pkts),
-						   TICKS_TO_NSEC(ptd_copy[q].latency_max_interval),
-						   TICKS_TO_NSEC(ptd_copy[q].latency_min_interval));
+					printf("Port %u queue %u avg latency    : min/avg/max: (%lu ns)/(%lu ns)/(%lu ns)\n",
+							ptd_copy[q].port, ptd_copy[q].queue,
+							TICKS_TO_NSEC(ptd_copy[q].counters.latency_min),
+							TICKS_TO_NSEC(ptd_copy[q].counters.latency_sum/ptd_copy[q].counters.num_rx_pkts),
+							TICKS_TO_NSEC(ptd_copy[q].counters.latency_max));
 
-					tot_rx_pkts += ptd_copy[q].num_rx_pkts;
-					tot_rx_pps += ptd_copy[q].num_rx_pkts - ptd_copy[q].old_rx_pkts;
+					interval_rx_pkts += ptd_copy[q].counters.num_rx_pkts;
+					interval_rx_pps += ptd_copy[q].counters.num_rx_pkts;
 				} else {
 					printf("Port %u queue %u rx pkts        : No packets received\n",
 						   ptd_copy[q].port, ptd_copy[q].queue);
 				}
 			}
 		}
-		printf("%-30s: %15lu (%lu pps)\n", "Total Tx pkts", tot_tx_pkts, tot_tx_pps);
-		printf("%-30s: %15lu (%lu pps)\n", "Total Rx pkts", tot_rx_pkts, tot_rx_pps);
+		printf("%-30s: %15lu (%lu pps)\n", "Interval Tx pkts", tot_tx_pkts, tot_tx_pps);
+		printf("%-30s: %15lu (%lu pps)\n", "Interval Rx pkts", interval_rx_pkts, interval_rx_pps);
 	}
 
 	printf("Stopping Tx threads and waiting for Rx threads to finish\n");
@@ -686,45 +676,46 @@ int main(int argc, char **argv)
 	rx_should_stop = 1;
 	rte_eal_mp_wait_lcore();
 
-	uint64_t tot_rx_pkts = 0;
-	uint64_t tot_tx_pkts = 0;
 	uint64_t latency_avg = 0;
 	uint64_t latency_min = 0xffffffffffffffff;
 	uint64_t latency_max = 0;
 	uint64_t time_diff = clock_diff(started, actual);
 
 	for (q = 0; q < num_threads; q++) {
-		if (ptd[q].type != THREAD_RX) {
-			tot_tx_pkts += ptd[q].num_tx_pkts;
+		if (ptd[q].type == THREAD_TX) {
+			rt_ctrs.num_tx_pkts += ptd[q].counters.num_tx_pkts;
+			rt_ctrs.num_tx_octets += ptd[q].counters.num_tx_octets;
 
 		} else {
-			tot_rx_pkts += ptd[q].num_rx_pkts;
-			if (likely(ptd[q].num_rx_pkts))
-				latency_avg += ptd[q].latency_sum/ptd[q].num_rx_pkts;
+			rt_ctrs.num_rx_pkts += ptd[q].counters.num_rx_pkts;
+			rt_ctrs.num_rx_octets += ptd[q].counters.num_rx_octets;
+			if (likely(ptd[q].counters.num_rx_pkts))
+				latency_avg += ptd[q].counters.latency_sum/ptd[q].counters.num_rx_pkts;
 
-			if (ptd[q].latency_min_interval < ptd[q].latency_min)
-				ptd[q].latency_min = ptd[q].latency_min_interval;
-			if (ptd[q].latency_max_interval > ptd[q].latency_max)
-				ptd[q].latency_max = ptd[q].latency_max_interval;
+			rt_ctrs.latency_sum += ptd[q].counters.latency_sum;
+			if (ptd[q].counters.latency_min < rt_ctrs.latency_min)
+				rt_ctrs.latency_min = ptd[q].counters.latency_min;
+			if (ptd[q].counters.latency_max > rt_ctrs.latency_max)
+				rt_ctrs.latency_max = ptd[q].counters.latency_max;
 
-			if (latency_min > ptd[q].latency_min)
-				latency_min = ptd[q].latency_min;
-			if (latency_max < ptd[q].latency_max)
-				latency_max = ptd[q].latency_max;
+			if (latency_min > ptd[q].counters.latency_min)
+				latency_min = ptd[q].counters.latency_min;
+			if (latency_max < ptd[q].counters.latency_max)
+				latency_max = ptd[q].counters.latency_max;
 		}
 	}
 	printf("--- pktgen traffic statistics ---\n");
 	printf("%lu packets transmitted, %lu received, lost %lu (%i%% packet loss), time %lu ms\n",
-		   tot_tx_pkts, tot_rx_pkts,
-		   tot_tx_pkts - tot_rx_pkts,
-		   (int)((tot_tx_pkts - tot_rx_pkts) * 100 / tot_tx_pkts),
-		   time_diff);
+			rt_ctrs.num_tx_pkts, rt_ctrs.num_tx_pkts,
+			rt_ctrs.num_tx_pkts - rt_ctrs.num_tx_pkts,
+			(int)((rt_ctrs.num_tx_pkts - rt_ctrs.num_tx_pkts) * 100 / rt_ctrs.num_tx_pkts),
+			time_diff);
 
 	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns\n",
-		   ((tot_tx_pkts + tot_rx_pkts) * conf->packet_size * 8 / time_diff),
-		   TICKS_TO_NSEC(latency_min),
-		   TICKS_TO_NSEC(latency_avg/(conf->num_ports * conf->num_rx_queues)),
-		   TICKS_TO_NSEC(latency_max));
+		   ((rt_ctrs.num_tx_octets + rt_ctrs.num_rx_octets) * 8 / time_diff),
+		   TICKS_TO_NSEC(rt_ctrs.latency_min),
+		   TICKS_TO_NSEC(rt_ctrs.latency_sum / rt_ctrs.num_tx_pkts),
+		   TICKS_TO_NSEC(rt_ctrs.latency_max));
 
 	return 0;
 }
