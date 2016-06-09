@@ -145,6 +145,37 @@ typedef struct {
 
 counters rt_ctrs = {0};
 
+static inline void dump_dpdk_error(uint64_t flags)
+{
+	printf("received packet with DPDK errors: ");
+	__asm__("int $3");
+	if (flags & PKT_RX_L4_CKSUM_BAD)
+		printf("L4 cksum of RX pkt. is not OK.\n");
+	if (flags & PKT_RX_IP_CKSUM_BAD)
+		printf("IP cksum of RX pkt. is not OK.\n");
+	if (flags & PKT_RX_EIP_CKSUM_BAD)
+		printf("External IP header checksum error.\n");
+	if (flags & PKT_RX_OVERSIZE)
+		printf("Num of desc of an RX pkt oversize.\n");
+	if (flags & PKT_RX_HBUF_OVERFLOW)
+		printf("Header buffer overflow.\n");
+	if (flags & PKT_RX_RECIP_ERR)
+		printf("Hardware processing error.\n");
+	if (flags & PKT_RX_MAC_ERR)
+		printf("MAC error.\n");
+	if (flags & PKT_RX_IEEE1588_PTP)
+		printf("RX IEEE1588 L2 Ethernet PT Packet.\n");
+	if (flags & PKT_RX_IEEE1588_TMST)
+		printf("RX IEEE1588 L2/L4 timestamped packet.\n");
+	if (flags & PKT_RX_FDIR_ID)
+		printf("FD id reported if FDIR match.\n");
+	if (flags & PKT_RX_FDIR_FLX)
+		printf("Flexible bytes reported if FDIR match.\n");
+	if (flags & PKT_RX_QINQ_PKT)
+		printf(") RX packet with double VLAN stripped.\n");
+	printf("\n");
+}
+
 static inline void
 calculate_checksum(struct rte_mbuf *pkt)
 {
@@ -418,6 +449,9 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				ptd->counters.latency_min = latency;
 			if (latency > ptd->counters.latency_max)
 				ptd->counters.latency_max = latency;
+
+			if (unlikely(pkts[i]->ol_flags & 0xFFFFFFFFFFFFFFF8)) /* mask lowest 3 bits */
+				dump_dpdk_error(pkts[i]->ol_flags);
 
 			ptd->counters.num_rx_octets += pkts[i]->pkt_len;
 			rte_pktmbuf_free(pkts[i]);
@@ -712,7 +746,7 @@ int main(int argc, char **argv)
 			time_diff);
 
 	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns\n",
-		   ((rt_ctrs.num_tx_octets + rt_ctrs.num_rx_octets) * 8 / time_diff),
+		   ((rt_ctrs.num_tx_octets) * 8 / time_diff),
 		   TICKS_TO_NSEC(rt_ctrs.latency_min),
 		   TICKS_TO_NSEC(rt_ctrs.latency_sum / rt_ctrs.num_tx_pkts),
 		   TICKS_TO_NSEC(rt_ctrs.latency_max));

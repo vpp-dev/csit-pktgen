@@ -204,7 +204,7 @@ static int parse_ports(char *str)
 
 #define dbg(str, ...) printf("CONFIG: "); printf(str, ##__VA_ARGS__);
 
-static void validate_configuration()
+static void validate_configuration(void)
 {
 	if ((conf.rate) && (conf.pps))
 		die("Please select --rate OR --pps.");
@@ -215,6 +215,11 @@ static void validate_configuration()
 			(unsigned long)conf.pps,
 			(unsigned long)conf.packet_size);
     }
+
+    if (conf.pps)
+		conf.rate /= 2; /* divide speed between 2 ports */
+
+	
 }
 
 int parse_cmdline(int argc, char **argv)
