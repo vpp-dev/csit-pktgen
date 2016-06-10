@@ -397,11 +397,10 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 			}
 		}
 	}
-
 	if (tx_threads_stopped == conf->num_tx_queues * conf->num_ports) { /* this was the last thread */
 		kill(0, SIGALRM);
 	}
-
+	__sync_fetch_and_add(b->num_workers, -1);
 	return 0;
 }
 
@@ -457,19 +456,20 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			rte_pktmbuf_free(pkts[i]);
 		}
 	}
-
+	__sync_fetch_and_add(b->num_workers, -1);
 	return 0;
 }
 
+enum { QUIT_CTRL_C=1, QUIT_ALARM };
 static void signal_stop(__attribute__((unused)) int signal)
 {
 	printf("\nSIGSTOP received, exitting...\n");
-	should_quit = 1;
+	should_quit = QUIT_CTRL_C;
 }
 
 static void signal_alarm(__attribute__((unused)) int signal)
 {
-	should_quit = 1;
+	should_quit = QUIT_ALARM;
 }
 
 static uint64_t clock_diff(struct timespec start, struct timespec end)
@@ -485,88 +485,20 @@ static uint64_t clock_diff(struct timespec start, struct timespec end)
 	return temp.tv_sec*1000+temp.tv_nsec/1000000;
 }
 
-int main(int argc, char **argv)
+static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 {
-	int ret;
-	int socketid = 0;
 	int lcore_id;
-	struct rte_eth_txconf *txconf;
-	struct rte_eth_dev_info dev_info;
-	int p, q, d, i;
-	per_thread_data_t * ptd, * ptd_copy;
-	int num_threads;
+	int p, q, d;
+	int num_threads = conf->num_ports * (conf->num_rx_queues + conf->num_tx_queues);
 
-	for (i=0; i<argc; i++)
-		if ((!strncmp(argv[i], "--", 2)) && (strlen(argv[i]) == 2))
-			break;
-
-	parse_cmdline(argc-i, &argv[i]); /* parameters after "--" are for pktgen */
-
-	ret = rte_eal_init(i, argv); /* first parameter set is for dpdk, separated with "--" */
-	if (ret < 0)
-		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
-
-	conf = get_config();
-	num_threads = conf->num_ports * (conf->num_rx_queues + conf->num_tx_queues);
-
-	signal(SIGINT, signal_stop);
-	signal(SIGALRM, signal_alarm);
-
-	ticks_per_sec = rte_get_tsc_hz();
-	ticks_per_usec = ticks_per_sec/1000000;
-
-	pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool0", 32768,
-										   MEMPOOL_CACHE_SIZE, 0,
-										   RTE_MBUF_DEFAULT_BUF_SIZE, 0);
-
-	if (pktmbuf_pool == NULL)
-		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
-
-	if (rte_eth_dev_count() !=  conf->num_ports)
-		rte_exit(EXIT_FAILURE, "Please whitelist only %u device\n",
-				 conf->num_ports);
-
-	for (p = 0; p < conf->num_ports; p++) {
-
-		ret = rte_eth_dev_configure(p, conf->num_rx_queues, conf->num_tx_queues, &port_conf);
-		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_dev_configure:"
-								   " err=%d, port=%d\n", ret, p);
-
-		for (q = 0; q < conf->num_rx_queues; q++) {
-			ret = rte_eth_rx_queue_setup(p, q, 512, socketid, NULL, pktmbuf_pool);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE,"rte_eth_rx_queue_setup:"
-									  " err=%d, port=%d queue=%d\n", ret, p, q);
-		}
-
-		/* Setup TX queue */
-		rte_eth_dev_info_get(p, &dev_info);
-		txconf = &dev_info.default_txconf;
-		for (q = 0; q < conf->num_tx_queues; q++) {
-			ret = rte_eth_tx_queue_setup(p, q, 512, socketid, txconf);
-			if (ret < 0)
-				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:"
-									   " err=%d, port=%d queue %d\n", ret, p, q);
-		}
-
-		rte_eth_promiscuous_enable(p);
-
-		ret = rte_eth_dev_start(p);
-		if (ret < 0)
-			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d,"
-								   " port=%d\n", ret, p);
-	}
-
-	b = worker_barrier_init(num_threads);
+	if (ptd)
+		free(ptd);
 
 	ptd = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
-	ptd_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
 	memset(ptd, 0, num_threads * sizeof(per_thread_data_t));
 
 	p = q = d = 0;
 
-	clock_gettime(CLOCK_MONOTONIC, &started);
 	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
 		int threads_per_port = conf->num_tx_queues + conf->num_rx_queues;
 		int i = p * threads_per_port + q;
@@ -577,7 +509,8 @@ int main(int argc, char **argv)
 		ptd[i].lcore_id = lcore_id;
 
 		if (q < conf->num_tx_queues) {
-			ptd[i].delay = ticks_per_sec / (conf->pps / conf->num_tx_queues);
+			if (conf->pps)
+				ptd[i].delay = ticks_per_sec / (conf->pps / conf->num_tx_queues);
 			ptd[i].pts = conf->pts / conf->num_tx_queues;
 			ptd[i].queue = q;
 			ptd[i].type = THREAD_TX;
@@ -607,12 +540,14 @@ int main(int argc, char **argv)
 			ptd[i].dst_port = conf->dst_port+q;
 			ptd[i].pkt_len = conf->packet_size;
 
+			__sync_fetch_and_add(b->num_workers,  1);
 			rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
 		} else {
 			ptd[i].queue = q - conf->num_tx_queues;
 			ptd[i].type = THREAD_RX;
 			ptd[i].counters.latency_min = 0xffffffffffffffff;
 			ptd[i].counters.latency_max = 0;
+			__sync_fetch_and_add(b->num_workers,  1);
 			rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
 		}
 
@@ -625,17 +560,119 @@ int main(int argc, char **argv)
 
 	if (conf->duration)
 		alarm(conf->duration);
+
+	return ptd;
+}
+
+int main(int argc, char **argv)
+{
+	int ret;
+	int socketid = 0;
+	struct rte_eth_txconf *txconf;
+	struct rte_eth_dev_info dev_info;
+	int p, q, i;
+	per_thread_data_t * ptd = NULL, * ptd_copy;
+	int num_threads;
+
+	for (i=0; i<argc; i++)
+		if ((!strncmp(argv[i], "--", 2)) && (strlen(argv[i]) == 2))
+			break;
+
+	parse_cmdline(argc-i, &argv[i]); /* parameters after "--" are for pktgen */
+
+	ret = rte_eal_init(i, argv); /* first parameter set is for dpdk, separated with "--" */
+	if (ret < 0)
+		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
+
+	conf = get_config();
+
+	signal(SIGINT, signal_stop);
+	signal(SIGALRM, signal_alarm);
+
+	ticks_per_sec = rte_get_tsc_hz();
+	ticks_per_usec = ticks_per_sec/1000000;
+	num_threads = conf->num_ports * (conf->num_rx_queues + conf->num_tx_queues);
+
+	pktmbuf_pool = rte_pktmbuf_pool_create("mbuf_pool0", 32768,
+										   MEMPOOL_CACHE_SIZE, 0,
+										   RTE_MBUF_DEFAULT_BUF_SIZE, 0);
+
+	if (pktmbuf_pool == NULL)
+		rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
+
+	if (rte_eth_dev_count() !=  conf->num_ports)
+		rte_exit(EXIT_FAILURE, "Please whitelist only %u device\n",
+				 conf->num_ports);
+
+	for (p = 0; p < conf->num_ports; p++) {
+
+		ret = rte_eth_dev_configure(p, conf->num_rx_queues, conf->num_tx_queues, &port_conf);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_configure:"
+								" err=%d, port=%d\n", ret, p);
+
+		for (q = 0; q < conf->num_rx_queues; q++) {
+			ret = rte_eth_rx_queue_setup(p, q, 512, socketid, NULL, pktmbuf_pool);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE,"rte_eth_rx_queue_setup:"
+									" err=%d, port=%d queue=%d\n", ret, p, q);
+		}
+
+		/* Setup TX queue */
+		rte_eth_dev_info_get(p, &dev_info);
+		txconf = &dev_info.default_txconf;
+		for (q = 0; q < conf->num_tx_queues; q++) {
+			ret = rte_eth_tx_queue_setup(p, q, 512, socketid, txconf);
+			if (ret < 0)
+				rte_exit(EXIT_FAILURE, "rte_eth_tx_queue_setup:"
+									" err=%d, port=%d queue %d\n", ret, p, q);
+		}
+
+		rte_eth_promiscuous_enable(p);
+
+		ret = rte_eth_dev_start(p);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d,"
+								" port=%d\n", ret, p);
+	}
+
+	b = worker_barrier_init();
+
+	clock_gettime(CLOCK_MONOTONIC, &started);
+	ptd_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
+	ptd = launch_threads(ptd);
+
 	rt_ctrs.latency_min = 0xffffffffffffffff;
 
-	while (!should_quit) {
+	while (1) {
 		uint64_t interval_rx_pkts = 0;
 		uint64_t interval_rx_pps = 0;
 		uint64_t tot_tx_pkts = 0;
 		uint64_t tot_tx_pps = 0;
 		sleep(conf->stats_interval);
 
-		if (should_quit)
-			break;
+		if (should_quit) {
+			if (should_quit == QUIT_CTRL_C)
+				break;
+
+			if (conf->test == BINSEARCH) {
+				tx_should_stop = 1; // stop TX
+				usleep(100000); // time to flush network card buffers
+				rx_should_stop = 1;
+				rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
+				should_quit = 0;
+				tx_should_stop = rx_should_stop = 0;
+				clear_barrier(b);
+
+				conf->pps += 2;
+
+				ptd = launch_threads(ptd); // relaunch again
+				continue;
+			}
+
+			if (conf->test == FIXRATE)
+				break;
+		}
 
 		worker_barrier_sync(b);
 		memcpy(ptd_copy, ptd, num_threads * sizeof(per_thread_data_t));

@@ -31,6 +31,12 @@ typedef struct {
 	int num_tx_queues;
     int num_rx_queues;
 
+	int step;
+	int min_rate;
+	int max_rate;
+	int drop;
+	int srch_duration;
+
 	int packet_size;
 	int macs_are_set;
 	int ipv6;
