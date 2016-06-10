@@ -29,7 +29,7 @@ static config_t conf = {
 	.num_rx_queues = 1,
 
 	.packet_size = 64,
-	.macs_are_set = 0,
+	.dst_macs_are_set = 0,
 	.ipv6 = 0,
 
 	.src_ip4 = {IPv4(172, 16, 0, 1), IPv4(172, 16, 1, 1)},
@@ -88,7 +88,7 @@ static int verify_int(char *value)
 
 static int parse_macs(char *str)
 {
-	uint8_t *bytes = (uint8_t *)&conf.mac[0];
+	uint8_t *bytes = (uint8_t *)&conf.dst_mac[0];
 	int values[6 * 2];
 	int i;
 
@@ -102,7 +102,6 @@ static int parse_macs(char *str)
 		for (i = 0; i < 12; ++i)
 			bytes[i] = (uint8_t) values[i];
 
-		conf.macs_are_set = 1;
 		return 0;
 	}
 	return 1;
@@ -318,6 +317,7 @@ int parse_cmdline(int argc, char **argv)
 		case DST_MACS:
 			if (parse_macs(optarg))
 				die("parameters for --dst-macs are invalid (\"%s\")", optarg);
+			conf.dst_macs_are_set = 1;
 			break;
 
 		case SRC_IPS:

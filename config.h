@@ -38,9 +38,10 @@ typedef struct {
 	int srch_duration;
 
 	int packet_size;
-	int macs_are_set;
+	int dst_macs_are_set;
 	int ipv6;
-	mac_t mac[2];
+	mac_t src_mac[2];
+	mac_t dst_mac[2];
 
 	uint32_t src_ip4[2];
 	uint32_t dst_ip4[2];

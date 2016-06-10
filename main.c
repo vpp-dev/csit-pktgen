@@ -515,21 +515,11 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 			ptd[i].queue = q;
 			ptd[i].type = THREAD_TX;
 			if (p == 0) {
-				if (!conf->macs_are_set) { /* macs was not set - use hardware macs */
-					rte_eth_macaddr_get (0, &ptd[i].src_mac);
-					rte_eth_macaddr_get (1, &ptd[i].dst_mac);
-				} else {
-					rte_memcpy(&ptd[i].src_mac, (const void *)&conf->mac[0], 6);
-					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->mac[1], 6);
-				}
+				rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[0], 6);
+				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[1], 6);
 			} else {
-				if (!conf->macs_are_set) { /* macs was not set - use hardware macs */
-					rte_eth_macaddr_get (1, &ptd[i].src_mac);
-					rte_eth_macaddr_get (0, &ptd[i].dst_mac);
-				} else {
-					rte_memcpy(&ptd[i].src_mac, (const void *)&conf->mac[1], 6);
-					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->mac[0], 6);
-				}
+				rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[1], 6);
+				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[0], 6);
 			}
 			ptd[i].src_ip4 = conf->src_ip4[p];
 			ptd[i].dst_ip4 = conf->dst_ip4[p];
@@ -649,6 +639,14 @@ int main(int argc, char **argv)
 		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
 
 	conf = get_config();
+
+	rte_eth_macaddr_get (0, (void *)&conf->src_mac[0]);
+	rte_eth_macaddr_get (1, (void *)&conf->src_mac[1]);
+
+	if (!conf->dst_macs_are_set) {
+		rte_eth_macaddr_get (0, (void *)&conf->src_mac[1]);
+		rte_eth_macaddr_get (1, (void *)&conf->src_mac[0]);
+	}
 
 	signal(SIGINT, signal_stop);
 	signal(SIGALRM, signal_alarm);
