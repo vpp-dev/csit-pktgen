@@ -13,7 +13,7 @@ static void clear_barrier(worker_barrier_t *b)
 }
 
 static worker_barrier_t *
-worker_barrier_init()
+worker_barrier_init(void)
 {
 	worker_barrier_t * b = aligned_alloc(64, 64);
 	b->barrier = aligned_alloc(64, 64);
