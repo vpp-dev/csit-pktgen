@@ -143,7 +143,7 @@ typedef struct {
 	uint64_t tsc; // time stamp counter
 } packet_payload;
 
-counters rt_ctrs = {0};
+counters runtime_cnt = {0};
 
 static inline void dump_dpdk_error(uint64_t flags)
 {
@@ -564,6 +564,70 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 	return ptd;
 }
 
+static void calculate_runtime_counters(counters *rtctr, per_thread_data_t * ptd, int num_threads)
+{
+	int q;
+
+	for (q = 0; q < num_threads; q++) {
+		runtime_cnt.num_tx_octets += ptd[q].counters.num_tx_octets;
+		runtime_cnt.num_tx_pkts   += ptd[q].counters.num_tx_pkts;
+		runtime_cnt.num_rx_octets += ptd[q].counters.num_rx_octets;
+		runtime_cnt.num_rx_pkts   += ptd[q].counters.num_rx_pkts;
+
+		if (ptd[q].type == THREAD_RX) {
+			runtime_cnt.latency_sum   += ptd[q].counters.latency_sum;
+			if (ptd[q].counters.latency_min < runtime_cnt.latency_min)
+				runtime_cnt.latency_min = ptd[q].counters.latency_min;
+			if (ptd[q].counters.latency_max > runtime_cnt.latency_max)
+				runtime_cnt.latency_max = ptd[q].counters.latency_max;
+		}
+
+		/* clear stats */
+		memset((void *)&ptd[q].counters, 0, sizeof(counters));
+
+		/* set min interval to maximum */
+		ptd[q].counters.latency_min = 0xffffffffffffffff;
+	}
+}
+
+static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
+{
+	int q;
+
+	printf("\n========== run time %lu sec ==========\n", clock_diff(started, actual)/1000);
+
+	for (q = 0; q < num_threads; q++) {
+
+		if (ptd[q].type != THREAD_RX)
+		{
+			printf("Port %u queue %u tx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
+				   ptd[q].port, ptd[q].queue,
+		  ptd[q].counters.num_tx_pkts,
+		  ptd[q].counters.num_tx_pkts / conf->stats_interval,
+		  ptd[q].counters.num_tx_octets * 8 / (conf->stats_interval*1000));
+
+		} else {
+			if (ptd[q].counters.num_rx_pkts) {
+				printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
+					   ptd[q].port, ptd[q].queue,
+		   ptd[q].counters.num_rx_pkts,
+		   ptd[q].counters.num_rx_pkts / conf->stats_interval,
+		   ptd[q].counters.num_rx_octets * 8 / (conf->stats_interval*1000));
+
+				printf("Port %u queue %u avg latency    : min/avg/max: (%lu ns)/(%lu ns)/(%lu ns)\n",
+					   ptd[q].port, ptd[q].queue,
+		   TICKS_TO_NSEC(ptd[q].counters.latency_min),
+					   TICKS_TO_NSEC(ptd[q].counters.latency_sum/ptd[q].counters.num_rx_pkts),
+					   TICKS_TO_NSEC(ptd[q].counters.latency_max));
+
+			} else {
+				printf("Port %u queue %u rx pkts        : No packets received\n",
+					   ptd[q].port, ptd[q].queue);
+			}
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 	int ret;
@@ -571,7 +635,7 @@ int main(int argc, char **argv)
 	struct rte_eth_txconf *txconf;
 	struct rte_eth_dev_info dev_info;
 	int p, q, i;
-	per_thread_data_t * ptd = NULL, * ptd_copy;
+	per_thread_data_t * ptd = NULL, * interval_copy;
 	int num_threads;
 
 	for (i=0; i<argc; i++)
@@ -639,10 +703,10 @@ int main(int argc, char **argv)
 	b = worker_barrier_init();
 
 	clock_gettime(CLOCK_MONOTONIC, &started);
-	ptd_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
+	interval_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
 	ptd = launch_threads(ptd);
 
-	rt_ctrs.latency_min = 0xffffffffffffffff;
+	runtime_cnt.latency_min = 0xffffffffffffffff;
 
 	while (1) {
 		uint64_t interval_rx_pkts = 0;
@@ -663,6 +727,7 @@ int main(int argc, char **argv)
 				should_quit = 0;
 				tx_should_stop = rx_should_stop = 0;
 				clear_barrier(b);
+				calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
 
 				conf->pps += 2;
 
@@ -675,69 +740,12 @@ int main(int argc, char **argv)
 		}
 
 		worker_barrier_sync(b);
-		memcpy(ptd_copy, ptd, num_threads * sizeof(per_thread_data_t));
-
-		for (q = 0; q < num_threads; q++) {
-			rt_ctrs.num_tx_octets += ptd[q].counters.num_tx_octets;
-			rt_ctrs.num_tx_pkts   += ptd[q].counters.num_tx_pkts;
-			rt_ctrs.num_rx_octets += ptd[q].counters.num_rx_octets;
-			rt_ctrs.num_rx_pkts   += ptd[q].counters.num_rx_pkts;
-
-			if (ptd[q].type == THREAD_RX) {
-				rt_ctrs.latency_sum   += ptd[q].counters.latency_sum;
-				if (ptd[q].counters.latency_min < rt_ctrs.latency_min)
-					rt_ctrs.latency_min = ptd[q].counters.latency_min;
-				if (ptd[q].counters.latency_max > rt_ctrs.latency_max)
-					rt_ctrs.latency_max = ptd[q].counters.latency_max;
-			}
-
-			/* clear stats */
-			memset((void *)&ptd[q].counters, 0, sizeof(counters));
-
-			/* set min interval to maximum */
-			ptd[q].counters.latency_min = 0xffffffffffffffff;
-		}
-
+		memcpy(interval_copy, ptd, num_threads * sizeof(per_thread_data_t));
+		calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
 		worker_barrier_release(b);
+
 		clock_gettime(CLOCK_MONOTONIC, &actual);
-
-		printf("\n========== run time %lu sec ==========\n", clock_diff(started, actual)/1000);
-
-		for (q = 0; q < num_threads; q++) {
-
-			if (ptd_copy[q].type != THREAD_RX) {
-				printf("Port %u queue %u tx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
-						ptd_copy[q].port, ptd_copy[q].queue,
-						ptd_copy[q].counters.num_tx_pkts,
-						ptd_copy[q].counters.num_tx_pkts / conf->stats_interval,
-						ptd_copy[q].counters.num_tx_octets * 8 / (conf->stats_interval*1000));
-
-				tot_tx_pkts += ptd_copy[q].counters.num_tx_pkts;
-				tot_tx_pps += ptd_copy[q].counters.num_tx_pkts;
-			} else {
-				if (ptd_copy[q].counters.num_rx_pkts) {
-					printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
-							ptd_copy[q].port, ptd_copy[q].queue,
-							ptd_copy[q].counters.num_rx_pkts,
-							ptd_copy[q].counters.num_rx_pkts / conf->stats_interval,
-							ptd_copy[q].counters.num_rx_octets * 8 / (conf->stats_interval*1000));
-
-					printf("Port %u queue %u avg latency    : min/avg/max: (%lu ns)/(%lu ns)/(%lu ns)\n",
-							ptd_copy[q].port, ptd_copy[q].queue,
-							TICKS_TO_NSEC(ptd_copy[q].counters.latency_min),
-							TICKS_TO_NSEC(ptd_copy[q].counters.latency_sum/ptd_copy[q].counters.num_rx_pkts),
-							TICKS_TO_NSEC(ptd_copy[q].counters.latency_max));
-
-					interval_rx_pkts += ptd_copy[q].counters.num_rx_pkts;
-					interval_rx_pps += ptd_copy[q].counters.num_rx_pkts;
-				} else {
-					printf("Port %u queue %u rx pkts        : No packets received\n",
-						   ptd_copy[q].port, ptd_copy[q].queue);
-				}
-			}
-		}
-		printf("%-30s: %15lu (%lu pps)\n", "Interval Tx pkts", tot_tx_pkts, tot_tx_pps);
-		printf("%-30s: %15lu (%lu pps)\n", "Interval Rx pkts", interval_rx_pkts, interval_rx_pps);
+		dump_ptd_stats(interval_copy, num_threads);
 	}
 
 	printf("Stopping Tx threads and waiting for Rx threads to finish\n");
@@ -747,46 +755,22 @@ int main(int argc, char **argv)
 	rx_should_stop = 1;
 	rte_eal_mp_wait_lcore();
 
-	uint64_t latency_avg = 0;
-	uint64_t latency_min = 0xffffffffffffffff;
-	uint64_t latency_max = 0;
 	uint64_t time_diff = clock_diff(started, actual);
 
-	for (q = 0; q < num_threads; q++) {
-		if (ptd[q].type == THREAD_TX) {
-			rt_ctrs.num_tx_pkts += ptd[q].counters.num_tx_pkts;
-			rt_ctrs.num_tx_octets += ptd[q].counters.num_tx_octets;
+	calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
 
-		} else {
-			rt_ctrs.num_rx_pkts += ptd[q].counters.num_rx_pkts;
-			rt_ctrs.num_rx_octets += ptd[q].counters.num_rx_octets;
-			if (likely(ptd[q].counters.num_rx_pkts))
-				latency_avg += ptd[q].counters.latency_sum/ptd[q].counters.num_rx_pkts;
-
-			rt_ctrs.latency_sum += ptd[q].counters.latency_sum;
-			if (ptd[q].counters.latency_min < rt_ctrs.latency_min)
-				rt_ctrs.latency_min = ptd[q].counters.latency_min;
-			if (ptd[q].counters.latency_max > rt_ctrs.latency_max)
-				rt_ctrs.latency_max = ptd[q].counters.latency_max;
-
-			if (latency_min > ptd[q].counters.latency_min)
-				latency_min = ptd[q].counters.latency_min;
-			if (latency_max < ptd[q].counters.latency_max)
-				latency_max = ptd[q].counters.latency_max;
-		}
-	}
 	printf("--- pktgen traffic statistics ---\n");
 	printf("%lu packets transmitted, %lu received, lost %lu (%i%% packet loss), time %lu ms\n",
-			rt_ctrs.num_tx_pkts, rt_ctrs.num_tx_pkts,
-			rt_ctrs.num_tx_pkts - rt_ctrs.num_tx_pkts,
-			(int)((rt_ctrs.num_tx_pkts - rt_ctrs.num_tx_pkts) * 100 / rt_ctrs.num_tx_pkts),
+			runtime_cnt.num_tx_pkts, runtime_cnt.num_tx_pkts,
+			runtime_cnt.num_tx_pkts - runtime_cnt.num_tx_pkts,
+			(int)((runtime_cnt.num_tx_pkts - runtime_cnt.num_tx_pkts) * 100 / runtime_cnt.num_tx_pkts),
 			time_diff);
 
 	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns\n",
-		   ((rt_ctrs.num_tx_octets) * 8 / time_diff),
-		   TICKS_TO_NSEC(rt_ctrs.latency_min),
-		   TICKS_TO_NSEC(rt_ctrs.latency_sum / rt_ctrs.num_tx_pkts),
-		   TICKS_TO_NSEC(rt_ctrs.latency_max));
+		   ((runtime_cnt.num_tx_octets) * 8 / time_diff),
+		   TICKS_TO_NSEC(runtime_cnt.latency_min),
+		   TICKS_TO_NSEC(runtime_cnt.latency_sum / runtime_cnt.num_tx_pkts),
+		   TICKS_TO_NSEC(runtime_cnt.latency_max));
 
 	return 0;
 }
