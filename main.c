@@ -564,22 +564,22 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 	return ptd;
 }
 
-static void calculate_runtime_counters(counters *rtctr, per_thread_data_t * ptd, int num_threads)
+static void calculate_runtime_counters(counters *runtime_cnt, per_thread_data_t * ptd, int num_threads)
 {
 	int q;
 
 	for (q = 0; q < num_threads; q++) {
-		runtime_cnt.num_tx_octets += ptd[q].counters.num_tx_octets;
-		runtime_cnt.num_tx_pkts   += ptd[q].counters.num_tx_pkts;
-		runtime_cnt.num_rx_octets += ptd[q].counters.num_rx_octets;
-		runtime_cnt.num_rx_pkts   += ptd[q].counters.num_rx_pkts;
+		runtime_cnt->num_tx_octets += ptd[q].counters.num_tx_octets;
+		runtime_cnt->num_tx_pkts   += ptd[q].counters.num_tx_pkts;
+		runtime_cnt->num_rx_octets += ptd[q].counters.num_rx_octets;
+		runtime_cnt->num_rx_pkts   += ptd[q].counters.num_rx_pkts;
 
 		if (ptd[q].type == THREAD_RX) {
-			runtime_cnt.latency_sum   += ptd[q].counters.latency_sum;
-			if (ptd[q].counters.latency_min < runtime_cnt.latency_min)
-				runtime_cnt.latency_min = ptd[q].counters.latency_min;
-			if (ptd[q].counters.latency_max > runtime_cnt.latency_max)
-				runtime_cnt.latency_max = ptd[q].counters.latency_max;
+			runtime_cnt->latency_sum   += ptd[q].counters.latency_sum;
+			if (ptd[q].counters.latency_min < runtime_cnt->latency_min)
+				runtime_cnt->latency_min = ptd[q].counters.latency_min;
+			if (ptd[q].counters.latency_max > runtime_cnt->latency_max)
+				runtime_cnt->latency_max = ptd[q].counters.latency_max;
 		}
 
 		/* clear stats */
@@ -709,10 +709,6 @@ int main(int argc, char **argv)
 	runtime_cnt.latency_min = 0xffffffffffffffff;
 
 	while (1) {
-		uint64_t interval_rx_pkts = 0;
-		uint64_t interval_rx_pps = 0;
-		uint64_t tot_tx_pkts = 0;
-		uint64_t tot_tx_pps = 0;
 		sleep(conf->stats_interval);
 
 		if (should_quit) {
