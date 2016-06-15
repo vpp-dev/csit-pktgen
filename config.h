@@ -10,6 +10,9 @@
 #define PORT_INCREMENT (1<<16)
 #define PORT_RANDOM (1<<17)
 
+#define rate_to_pps(x) ((x)/8/conf->packet_size)
+#define pps_to_rate(x) ((x)*8*conf->packet_size)
+
 /* csit-pktgen run mode */
 enum {BINSEARCH, DELAY, FIXRATE, LINSEARCH};
 
@@ -24,7 +27,6 @@ typedef struct {
 	int stats_interval;
 	int duration; /* run time duration in sec */
 	uint64_t pps;  /* number of transmitted packets per sec, 0 == no delay between packets */
-	uint64_t rate; /* line rate in Bps */
 	int pts; /* quit after transmitting pts packets */
 
 	int num_ports;
@@ -32,10 +34,10 @@ typedef struct {
     int num_rx_queues;
 
 	int step;
-	int min_rate;
-	int max_rate;
+	uint64_t min_rate;
+	uint64_t cur_rate;
+	uint64_t max_rate;
 	int drop;
-	int srch_duration;
 
 	int packet_size;
 	int dst_macs_are_set;

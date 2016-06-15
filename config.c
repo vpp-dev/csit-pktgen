@@ -12,16 +12,16 @@
 #include <sys/socket.h>
 #include <netdb.h>
 
-static config_t conf;
+static config_t config;
+static config_t *conf = &config;
 
 /* default parameters */
-static config_t conf = {
+static config_t config = {
 	.test = FIXRATE,
 
 	.stats_interval = 3,
 	.duration = 0,
 	.pps = 0,
-	.rate = 0,
 	.pts = 0,
 
 	.num_ports = 2,
@@ -41,7 +41,7 @@ static config_t conf = {
 
 config_t *get_config(void)
 {
-	return &conf;
+	return &config;
 }
 
 static void print_usage(void)
@@ -86,9 +86,24 @@ static int verify_int(char *value)
 	return atoi(value);
 }
 
+static uint64_t verify_uint64(char *value)
+{
+	int x = 0;
+	int len = strlen(value);
+	char * pEnd;
+
+	while(x < len) {
+		if(!isdigit(*(value+x)))
+			die("invalid numeric value %s !", value);
+		++x;
+	}
+
+	return (uint64_t)strtoull(value, &pEnd, 10);
+}
+
 static int parse_macs(char *str)
 {
-	uint8_t *bytes = (uint8_t *)&conf.dst_mac[0];
+	uint8_t *bytes = (uint8_t *)&config.dst_mac[0];
 	int values[6 * 2];
 	int i;
 
@@ -131,31 +146,31 @@ static int parse_ips(char *str, int src_dst)
 
 	if (src_dst == 1) { // source IP addr
 		if (is_ipv4) {
-			if (!inet_pton(AF_INET, str, (struct in_addr *)&conf.src_ip4[0]))
+			if (!inet_pton(AF_INET, str, (struct in_addr *)&config.src_ip4[0]))
 				return 1;
-			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&conf.src_ip4[1]))
+			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&config.src_ip4[1]))
 				return 1;
-			conf.src_ip4[0] = ntohl(conf.src_ip4[0]);
-			conf.src_ip4[1] = ntohl(conf.src_ip4[1]);
+			config.src_ip4[0] = ntohl(config.src_ip4[0]);
+			config.src_ip4[1] = ntohl(config.src_ip4[1]);
 		} else {
-			if (!inet_pton(AF_INET6, str, &conf.src_ip6))
+			if (!inet_pton(AF_INET6, str, &config.src_ip6))
 				return 1;
-			if (!inet_pton(AF_INET6, separator+1, &conf.src_ip6[16]))
+			if (!inet_pton(AF_INET6, separator+1, &config.src_ip6[16]))
 				return 1;
 		}
 
 	} else { // destination IP addr
 		if (is_ipv4) {
-			if (!inet_pton(AF_INET, str, (struct in_addr *)&conf.dst_ip4[0]))
+			if (!inet_pton(AF_INET, str, (struct in_addr *)&config.dst_ip4[0]))
 				return 1;
-			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&conf.dst_ip4[1]))
+			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&config.dst_ip4[1]))
 				return 1;
-			conf.dst_ip4[0] = ntohl(conf.dst_ip4[0]);
-			conf.dst_ip4[1] = ntohl(conf.dst_ip4[1]);
+			config.dst_ip4[0] = ntohl(config.dst_ip4[0]);
+			config.dst_ip4[1] = ntohl(config.dst_ip4[1]);
 		} else {
-			if (!inet_pton(AF_INET6, str, &conf.dst_ip6))
+			if (!inet_pton(AF_INET6, str, &config.dst_ip6))
 				return 1;
-			if (!inet_pton(AF_INET6, separator+1, &conf.dst_ip6[16]))
+			if (!inet_pton(AF_INET6, separator+1, &config.dst_ip6[16]))
 				return 1;
 		}
 
@@ -175,28 +190,28 @@ static int parse_ports(char *str)
 		return 1;
 
 	if (!strncmp(port1, "random", 6)) {
-		conf.src_port = PORT_RANDOM;
+		config.src_port = PORT_RANDOM;
 	} else if (port1[0] == '+') {
-		if (sscanf(port1+1, "%i", &conf.src_port) != 1)
+		if (sscanf(port1+1, "%i", &config.src_port) != 1)
 			return 1;
-		conf.src_port |= PORT_INCREMENT;
+		config.src_port |= PORT_INCREMENT;
 	} else
-		if (sscanf(port1, "%i", &conf.src_port) != 1)
+		if (sscanf(port1, "%i", &config.src_port) != 1)
 		return 1;
 	else
-		conf.src_port &= 0xffff;
+		config.src_port &= 0xffff;
 
 	if (!strncmp(port2, "random", 6)) {
-		conf.dst_port = PORT_RANDOM;
+		config.dst_port = PORT_RANDOM;
 	} else if (port2[0] == '+') {
-		if (sscanf(port2+1, "%i", &conf.dst_port) != 1)
+		if (sscanf(port2+1, "%i", &config.dst_port) != 1)
 			return 1;
-		conf.dst_port |= PORT_INCREMENT;
+		config.dst_port |= PORT_INCREMENT;
 	} else
-		if (sscanf(port2, "%i", &conf.dst_port) != 1)
+		if (sscanf(port2, "%i", &config.dst_port) != 1)
 		return 1;
 	else
-		conf.dst_port &= 0xffff;
+		config.dst_port &= 0xffff;
 
 	return 0;
 }
@@ -205,28 +220,16 @@ static int parse_ports(char *str)
 
 static void validate_configuration(void)
 {
-	if ((conf.rate) && (conf.pps))
-		die("Please select --rate OR --pps.");
 
-	if (conf.rate) { /* calculate line rate */
-		conf.pps = (conf.rate / 8) / (conf.packet_size);
-		dbg("Line rate: sending %lu pps with size %lu bytes\n",
-			(unsigned long)conf.pps,
-			(unsigned long)conf.packet_size);
-    }
-
-    if (conf.pps)
-		conf.rate /= 2; /* divide speed between 2 ports */
-
-	
 }
 
 int parse_cmdline(int argc, char **argv)
 {
 	int c;
 
-	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES, NUM_RX_QUEUES,
-		  PACKET_SIZE, IPV6, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS};
+	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES,
+		NUM_RX_QUEUES, PACKET_SIZE, IPV6, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS, MIN_RATE,
+		MAX_RATE, DROP, STEP};
 
 	while (1)
 	{
@@ -243,6 +246,11 @@ int parse_cmdline(int argc, char **argv)
 		{"num-ports",     required_argument, 0, NUM_PORTS},
 		{"num-tx-queues", required_argument, 0, NUM_TX_QUEUES},
 		{"num-rx-queues", required_argument, 0, NUM_RX_QUEUES},
+
+		{"min-rate",      required_argument, 0, MIN_RATE},
+		{"max-rate",      required_argument, 0, MAX_RATE},
+		{"drop",          required_argument, 0, DROP},
+		{"step",          required_argument, 0, STEP},
 
 		{"packet-size",   required_argument, 0, PACKET_SIZE},
 		{"ipv6",          no_argument,       0, IPV6},
@@ -267,57 +275,57 @@ int parse_cmdline(int argc, char **argv)
 
 		case TEST:
 			if (!strcmp(optarg, "binsearch"))
-				conf.test = BINSEARCH;
+				config.test = BINSEARCH;
 			else if (!strcmp(optarg, "delay"))
-				conf.test = DELAY;
+				config.test = DELAY;
 			else if (!strcmp(optarg, "fixrate"))
-				conf.test = FIXRATE;
+				config.test = FIXRATE;
 			else if (!strcmp(optarg, "linsearch"))
-				conf.test = LINSEARCH;
+				config.test = LINSEARCH;
 			else
 				die("Unknown test \"%s\"", optarg);
 			break;
 			
 		case STATS_INTERVAL:
-			conf.stats_interval = verify_int(optarg);
+			config.stats_interval = verify_int(optarg);
 			break;
 
 		case DURATION:
-			conf.duration = verify_int(optarg);
+			config.duration = verify_int(optarg);
 			break;
 
 		case PPS:
-			conf.pps = verify_int(optarg);
+			config.pps = verify_int(optarg);
 			break;
 
 		case RATE:
-			conf.rate = verify_int(optarg);
+			config.pps = rate_to_pps(verify_int(optarg));
 			break;
 
 		case PTS:
-			conf.pts = verify_int(optarg);
+			config.pts = verify_int(optarg);
 			break;
 
 		case NUM_PORTS:
-			conf.num_ports = verify_int(optarg);
+			config.num_ports = verify_int(optarg);
 			break;
 
 		case NUM_TX_QUEUES:
-			conf.num_tx_queues = verify_int(optarg);
+			config.num_tx_queues = verify_int(optarg);
 			break;
 
 		case NUM_RX_QUEUES:
-			conf.num_rx_queues = verify_int(optarg);
+			config.num_rx_queues = verify_int(optarg);
 			break;
 
 		case PACKET_SIZE:
-			conf.packet_size = verify_int(optarg);
+			config.packet_size = verify_int(optarg);
 			break;
 
 		case DST_MACS:
 			if (parse_macs(optarg))
 				die("parameters for --dst-macs are invalid (\"%s\")", optarg);
-			conf.dst_macs_are_set = 1;
+			config.dst_macs_are_set = 1;
 			break;
 
 		case SRC_IPS:
@@ -335,8 +343,24 @@ int parse_cmdline(int argc, char **argv)
 				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
 			break;
 
+		case STEP:
+			config.step = verify_int(optarg);
+			break;
+
+		case MIN_RATE:
+			config.min_rate = verify_uint64(optarg);
+			break;
+
+		case MAX_RATE:
+			config.max_rate = verify_uint64(optarg);
+			break;
+
+		case DROP:
+			config.drop = verify_uint64(optarg);
+			break;
+
 		case IPV6:
-			conf.ipv6 = 1;
+			config.ipv6 = 1;
 			break;
 
 		}

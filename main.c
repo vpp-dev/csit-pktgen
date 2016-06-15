@@ -132,7 +132,7 @@ typedef struct {
 	uint32_t dst_ip6[16];
 	uint32_t src_port;
 	uint32_t dst_port;
-	uint64_t delay; /* delay between packets */
+	uint64_t delay; /* delay between packets, calculated ad thread start frpm pps */
 	uint64_t pts; /* number of packets to send by this thread */
 
 	counters counters;
@@ -554,6 +554,37 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 	return ptd;
 }
 
+typedef enum {RATE_START, RATE_UP, RATE_DOWN} updown;
+static uint64_t binsrch_get_next_pps(updown direction)
+{
+	uint64_t interval;
+	uint64_t rate;
+
+	switch(direction)
+	{
+		case RATE_START:
+			interval = conf->max_rate - conf->min_rate;
+			rate = conf->min_rate + interval / 2;
+			printf("Linerate %lu Mbit/s (%lu pps).\n", rate/1000000, rate_to_pps(rate));
+			break;
+
+		case RATE_UP:
+			conf->min_rate = conf->cur_rate;
+			interval = conf->max_rate - conf->min_rate;
+			rate = conf->min_rate + interval / 2;
+			break;
+
+		case RATE_DOWN:
+			conf->max_rate = conf->cur_rate;
+			interval = conf->max_rate - conf->min_rate;
+			rate = conf->min_rate + interval / 2;
+			break;
+	}
+
+	conf->cur_rate = rate;
+	return rate_to_pps(rate);
+}
+
 static void calculate_runtime_counters(counters *runtime_cnt, per_thread_data_t * ptd, int num_threads)
 {
 	int q;
@@ -618,6 +649,21 @@ static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
 	}
 }
 
+static void dump_final_stats(counters *ctr, uint64_t time_diff)
+{
+	printf("%lu packets transmitted, %lu received, lost %lu (%i%% packet loss), time %lu ms\n",
+		ctr->num_tx_pkts, ctr->num_rx_pkts,
+		ctr->num_tx_pkts - ctr->num_rx_pkts,
+		(int)((ctr->num_tx_pkts - ctr->num_rx_pkts) * 100 / ctr->num_tx_pkts),
+		time_diff);
+
+	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns\n",
+		((ctr->num_tx_octets) * 8 / time_diff),
+		TICKS_TO_NSEC(ctr->latency_min),
+		TICKS_TO_NSEC(ctr->latency_sum / ctr->num_tx_pkts),
+		TICKS_TO_NSEC(ctr->latency_max));
+}
+
 int main(int argc, char **argv)
 {
 	int ret;
@@ -627,6 +673,7 @@ int main(int argc, char **argv)
 	int p, q, i;
 	per_thread_data_t * ptd = NULL, * interval_copy;
 	int num_threads;
+	uint64_t packetloss, old_pps=0;
 
 	for (i=0; i<argc; i++)
 		if ((!strncmp(argv[i], "--", 2)) && (strlen(argv[i]) == 2))
@@ -699,6 +746,9 @@ int main(int argc, char **argv)
 	}
 
 	b = worker_barrier_init();
+	if (conf->test == BINSEARCH) {
+		conf->pps = binsrch_get_next_pps(RATE_START);
+	}
 
 	clock_gettime(CLOCK_MONOTONIC, &started);
 	interval_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
@@ -715,16 +765,39 @@ int main(int argc, char **argv)
 
 			if (conf->test == BINSEARCH) {
 				tx_should_stop = 1; // stop TX
-				usleep(100000); // time to flush network card buffers
+				clock_gettime(CLOCK_MONOTONIC, &actual);
+				sleep(1); // time to flush network card buffers
 				rx_should_stop = 1;
 				rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
 				should_quit = 0;
 				tx_should_stop = rx_should_stop = 0;
 				clear_barrier(b);
 				calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
+				printf("\n");
+				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
 
-				conf->pps += 2;
+				packetloss = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
+				if (packetloss < (uint64_t)conf->drop)
+				{
+					conf->pps = binsrch_get_next_pps(RATE_UP);
+					printf("Increasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+				}
 
+				if (packetloss > (uint64_t)conf->drop)
+				{
+					conf->pps = binsrch_get_next_pps(RATE_DOWN);
+					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+				}
+
+				if (old_pps == conf->pps)
+				{
+					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					exit(0);
+				}
+
+				memset(&runtime_cnt, 0, sizeof(counters));
+				runtime_cnt.latency_min = 0xffffffffffffffff;
+				old_pps = conf->pps;
 				ptd = launch_threads(ptd); // relaunch again
 				continue;
 			}
@@ -745,26 +818,12 @@ int main(int argc, char **argv)
 	printf("Stopping Tx threads and waiting for Rx threads to finish\n");
 	tx_should_stop = 1;
 	clock_gettime(CLOCK_MONOTONIC, &actual);
-	usleep(100000);
+	sleep(1);
 	rx_should_stop = 1;
 	rte_eal_mp_wait_lcore();
 
-	uint64_t time_diff = clock_diff(started, actual);
-
 	calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
-
-	printf("--- pktgen traffic statistics ---\n");
-	printf("%lu packets transmitted, %lu received, lost %lu (%i%% packet loss), time %lu ms\n",
-			runtime_cnt.num_tx_pkts, runtime_cnt.num_tx_pkts,
-			runtime_cnt.num_tx_pkts - runtime_cnt.num_tx_pkts,
-			(int)((runtime_cnt.num_tx_pkts - runtime_cnt.num_tx_pkts) * 100 / runtime_cnt.num_tx_pkts),
-			time_diff);
-
-	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns\n",
-		   ((runtime_cnt.num_tx_octets) * 8 / time_diff),
-		   TICKS_TO_NSEC(runtime_cnt.latency_min),
-		   TICKS_TO_NSEC(runtime_cnt.latency_sum / runtime_cnt.num_tx_pkts),
-		   TICKS_TO_NSEC(runtime_cnt.latency_max));
+	dump_final_stats(&runtime_cnt, clock_diff(started, actual));
 
 	return 0;
 }
