@@ -16,6 +16,8 @@
 /* csit-pktgen run mode */
 enum {BINSEARCH, DELAY, FIXRATE, LINSEARCH};
 
+#define MAX_PKT_BURST        64
+
 typedef struct {
 	unsigned char mac[6];
 } mac_t;
@@ -31,7 +33,8 @@ typedef struct {
 
 	int num_ports;
 	int num_tx_queues;
-    int num_rx_queues;
+	int num_rx_queues;
+	int burst_size;
 
 	int step;
 	uint64_t min_rate;

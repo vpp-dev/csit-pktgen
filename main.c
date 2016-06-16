@@ -31,7 +31,6 @@
 #include "config.h"
 
 #define MEMPOOL_CACHE_SIZE   256
-#define MAX_PKT_BURST        32
 
 config_t *conf = NULL;
 
@@ -342,7 +341,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 	uint64_t tsc, last_run_tsc = 0;
 	packet_payload *payload;
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
-	int pkts_in_round = MAX_PKT_BURST;
+	int pkts_in_round = conf->burst_size;
 	int pkts_sent;
 	int pts_present = 0;
 
@@ -360,7 +359,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 
 		if(unlikely(ptd->pts)) {
 			pts_present = 1;
-			pkts_in_round = (ptd->pts > MAX_PKT_BURST) ? MAX_PKT_BURST : ptd->pts;
+			pkts_in_round = (ptd->pts > (uint64_t)conf->burst_size) ? conf->burst_size : ptd->pts;
 		}
 
 		if(unlikely(ptd->delay)) {
@@ -422,7 +421,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	while(!rx_should_stop) {
 		worker_barrier_check(b);
 
-		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, MAX_PKT_BURST);
+		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, conf->burst_size);
 		uint64_t tsc2 = rte_rdtsc_precise();
 		if (!nb_rx)
 			continue;
@@ -499,6 +498,7 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 
 	p = q = d = 0;
 
+	clock_gettime(CLOCK_MONOTONIC, &started);
 	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
 		int threads_per_port = conf->num_tx_queues + conf->num_rx_queues;
 		int i = p * threads_per_port + q;
@@ -750,7 +750,6 @@ int main(int argc, char **argv)
 		conf->pps = binsrch_get_next_pps(RATE_START);
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &started);
 	interval_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
 	ptd = launch_threads(ptd);
 

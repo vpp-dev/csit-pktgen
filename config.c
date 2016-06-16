@@ -27,6 +27,7 @@ static config_t config = {
 	.num_ports = 2,
 	.num_tx_queues = 1,
 	.num_rx_queues = 1,
+	.burst_size = 32,
 
 	.packet_size = 64,
 	.dst_macs_are_set = 0,
@@ -228,8 +229,8 @@ int parse_cmdline(int argc, char **argv)
 	int c;
 
 	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES,
-		NUM_RX_QUEUES, PACKET_SIZE, IPV6, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS, MIN_RATE,
-		MAX_RATE, DROP, STEP};
+		NUM_RX_QUEUES, BURST_SIZE, PACKET_SIZE, IPV6, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS,
+		MIN_RATE, MAX_RATE, DROP, STEP};
 
 	while (1)
 	{
@@ -246,6 +247,7 @@ int parse_cmdline(int argc, char **argv)
 		{"num-ports",     required_argument, 0, NUM_PORTS},
 		{"num-tx-queues", required_argument, 0, NUM_TX_QUEUES},
 		{"num-rx-queues", required_argument, 0, NUM_RX_QUEUES},
+		{"burst-size",    required_argument, 0, BURST_SIZE},
 
 		{"min-rate",      required_argument, 0, MIN_RATE},
 		{"max-rate",      required_argument, 0, MAX_RATE},
@@ -363,6 +365,13 @@ int parse_cmdline(int argc, char **argv)
 			config.ipv6 = 1;
 			break;
 
+		case BURST_SIZE:
+			config.burst_size = verify_int(optarg);
+			if (config.burst_size > 64) {
+				printf("Decreasing burst size to 64 !\n");
+				config.burst_size = 64;
+			}
+			break;
 		}
 	}
 	validate_configuration();
