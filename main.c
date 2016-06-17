@@ -38,9 +38,9 @@ config_t *conf = NULL;
 uint64_t ticks_per_sec;
 int ticks_per_usec;
 int should_quit = 0;
-volatile int rx_should_stop = 0; /* >0 to stop all rx threads */
-volatile int tx_should_stop = 0; /* >0 to stop all rx threads */
-volatile int tx_threads_stopped = 0; /* number of stopped tx threads */
+volatile unsigned int rx_should_stop = 0; /* >0 to stop all rx threads */
+volatile unsigned int tx_should_stop = 0; /* >0 to stop all rx threads */
+volatile unsigned int tx_threads_stopped = 0; /* number of stopped tx threads */
 struct timespec started, actual;
 
 worker_barrier_t *b;
@@ -487,7 +487,7 @@ static uint64_t clock_diff(struct timespec start, struct timespec end)
 static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 {
 	int lcore_id;
-	int p, q, d;
+	unsigned int p, q, d;
 	int num_threads = conf->num_ports * (conf->num_rx_queues + conf->num_tx_queues);
 
 	if (ptd)
@@ -500,7 +500,7 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 
 	clock_gettime(CLOCK_MONOTONIC, &started);
 	RTE_LCORE_FOREACH_SLAVE(lcore_id) {
-		int threads_per_port = conf->num_tx_queues + conf->num_rx_queues;
+		unsigned int threads_per_port = conf->num_tx_queues + conf->num_rx_queues;
 		int i = p * threads_per_port + q;
 		if (p == conf->num_ports)
 			continue;
@@ -670,7 +670,8 @@ int main(int argc, char **argv)
 	int socketid = 0;
 	struct rte_eth_txconf *txconf;
 	struct rte_eth_dev_info dev_info;
-	int p, q, i;
+	unsigned int p, q;
+	int i;
 	per_thread_data_t * ptd = NULL, * interval_copy;
 	int num_threads;
 	uint64_t packetloss, old_pps=0;

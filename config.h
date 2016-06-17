@@ -31,10 +31,10 @@ typedef struct {
 	uint64_t pps;  /* number of transmitted packets per sec, 0 == no delay between packets */
 	int pts; /* quit after transmitting pts packets */
 
-	int num_ports;
-	int num_tx_queues;
-	int num_rx_queues;
-	int burst_size;
+	unsigned int num_ports;
+	unsigned int num_tx_queues;
+	unsigned int num_rx_queues;
+	unsigned int burst_size;
 
 	int step;
 	uint64_t min_rate;
