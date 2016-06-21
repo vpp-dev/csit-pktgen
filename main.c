@@ -585,6 +585,29 @@ static uint64_t binsrch_get_next_pps(updown direction)
 	return rate_to_pps(rate);
 }
 
+static uint64_t linsrch_get_next_pps(updown direction)
+{
+	uint64_t rate;
+
+	switch(direction)
+	{
+		case RATE_START:
+			rate = conf->max_rate;
+			break;
+
+		case RATE_DOWN:
+			rate = conf->cur_rate - conf->step;
+			break;
+
+		case RATE_UP: /* unused here */
+			rate = 0;
+			break;
+	}
+
+	conf->cur_rate = rate;
+	return rate_to_pps(rate);
+}
+
 static void calculate_runtime_counters(counters *runtime_cnt, per_thread_data_t * ptd, int num_threads)
 {
 	int q;
@@ -748,8 +771,14 @@ int main(int argc, char **argv)
 	}
 
 	b = worker_barrier_init();
-	if (conf->test == BINSEARCH) {
-		conf->pps = binsrch_get_next_pps(RATE_START);
+	switch(conf->test) {
+		case BINSEARCH:
+			conf->pps = binsrch_get_next_pps(RATE_START);
+			break;
+
+		case LINSEARCH:
+			conf->pps = linsrch_get_next_pps(RATE_START);
+			break;
 	}
 
 	interval_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
@@ -792,12 +821,51 @@ int main(int argc, char **argv)
 
 				if (old_pps == conf->pps)
 				{
-					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					if (packetloss > (uint64_t)conf->drop)
+						printf("Rate not found !\n");
+					else
+						printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 					exit(0);
 				}
 
 				memset(&runtime_cnt, 0, sizeof(counters));
 				runtime_cnt.latency_min = 0xffffffffffffffff;
+				old_pps = conf->pps;
+				ptd = launch_threads(ptd); // relaunch again
+				continue;
+			}
+
+			if (conf->test == LINSEARCH) {
+				tx_should_stop = 1; // stop TX
+				clock_gettime(CLOCK_MONOTONIC, &actual);
+				sleep(1); // time to flush network card buffers
+				rx_should_stop = 1;
+				rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
+				should_quit = 0;
+				tx_should_stop = rx_should_stop = 0;
+				clear_barrier(b);
+				calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
+				printf("\n");
+				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
+
+				packetloss = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
+				if (packetloss > (uint64_t)conf->drop)
+				{
+					conf->pps = linsrch_get_next_pps(RATE_DOWN);
+					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+				} else
+				{
+					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					exit(0);
+				}
+
+				if (conf->cur_rate <= conf->min_rate) {
+					printf("Rate not found !\n");
+					exit(0);
+				}
+
+				memset(&runtime_cnt, 0, sizeof(counters));
+				runtime_cnt.latency_min = 0xffffffffffffffff; /* set maximum latency */
 				old_pps = conf->pps;
 				ptd = launch_threads(ptd); // relaunch again
 				continue;
