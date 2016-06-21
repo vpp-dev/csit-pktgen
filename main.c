@@ -657,11 +657,12 @@ static void dump_final_stats(counters *ctr, uint64_t time_diff)
 		(int)((ctr->num_tx_pkts - ctr->num_rx_pkts) * 100 / ctr->num_tx_pkts),
 		time_diff);
 
-	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns\n",
+	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns, pps: %lu\n",
 		((ctr->num_tx_octets) * 8 / time_diff),
 		TICKS_TO_NSEC(ctr->latency_min),
 		TICKS_TO_NSEC(ctr->latency_sum / ctr->num_tx_pkts),
-		TICKS_TO_NSEC(ctr->latency_max));
+		TICKS_TO_NSEC(ctr->latency_max),
+		ctr->num_rx_pkts / (time_diff/1000));
 }
 
 int main(int argc, char **argv)
