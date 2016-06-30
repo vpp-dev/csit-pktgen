@@ -355,7 +355,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 
 	while(!tx_should_stop) {
 		worker_barrier_check(b);
-		tsc = rte_rdtsc_precise();
+		tsc = rte_rdtsc();
 
 		if(unlikely(ptd->pts)) {
 			pts_present = 1;
@@ -377,7 +377,7 @@ lcore_tx_main(__attribute__((unused)) void *arg)
 			else
 				payload = craft_packet_ipv6(ptd, pkts[i]);
 
-			payload->tsc = rte_rdtsc_precise();
+			payload->tsc = rte_rdtsc();
 			calculate_checksum(pkts[i]);
 		}
 
@@ -422,7 +422,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 
 		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, conf->burst_size);
-		uint64_t tsc2 = rte_rdtsc_precise();
+		uint64_t tsc2 = rte_rdtsc();
 		if (!nb_rx)
 			continue;
 
