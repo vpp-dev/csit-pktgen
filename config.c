@@ -33,8 +33,8 @@ static config_t config = {
 	.dst_macs_are_set = 0,
 	.ipv6 = 0,
 
-	.src_ip4 = {IPv4(172, 16, 0, 1), IPv4(172, 16, 1, 1)},
-	.dst_ip4 = {IPv4(172, 16, 0, 2), IPv4(172, 16, 1, 2)},
+	.src_ip4 = {IPv4_NS(172, 16, 0, 1), IPv4_NS(172, 16, 1, 1)},
+	.dst_ip4 = {IPv4_NS(172, 16, 0, 2), IPv4_NS(172, 16, 1, 2)},
 	.src_port = 1024,
 	.dst_port = 2048,
 
@@ -151,8 +151,6 @@ static int parse_ips(char *str, int src_dst)
 				return 1;
 			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&config.src_ip4[1]))
 				return 1;
-			config.src_ip4[0] = ntohl(config.src_ip4[0]);
-			config.src_ip4[1] = ntohl(config.src_ip4[1]);
 		} else {
 			if (!inet_pton(AF_INET6, str, &config.src_ip6))
 				return 1;
@@ -166,8 +164,6 @@ static int parse_ips(char *str, int src_dst)
 				return 1;
 			if (!inet_pton(AF_INET, separator+1, (struct in_addr *)&config.dst_ip4[1]))
 				return 1;
-			config.dst_ip4[0] = ntohl(config.dst_ip4[0]);
-			config.dst_ip4[1] = ntohl(config.dst_ip4[1]);
 		} else {
 			if (!inet_pton(AF_INET6, str, &config.dst_ip6))
 				return 1;
@@ -297,15 +293,15 @@ int parse_cmdline(int argc, char **argv)
 			break;
 
 		case PPS:
-			config.pps = verify_int(optarg);
+			config.pps = verify_uint64(optarg);
 			break;
 
 		case RATE:
-			config.pps = rate_to_pps(verify_int(optarg));
+			config.pps = rate_to_pps(verify_uint64(optarg));
 			break;
 
 		case PTS:
-			config.pts = verify_int(optarg);
+			config.pts = verify_uint64(optarg);
 			break;
 
 		case NUM_PORTS:
@@ -346,7 +342,7 @@ int parse_cmdline(int argc, char **argv)
 			break;
 
 		case STEP:
-			config.step = verify_int(optarg);
+			config.step = verify_uint64(optarg);
 			break;
 
 		case MIN_RATE:

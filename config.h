@@ -12,6 +12,10 @@
 
 #define rate_to_pps(x) ((x)/8/conf->packet_size)
 #define pps_to_rate(x) ((x)*8*conf->packet_size)
+#define IPv4_NS(a,b,c,d) ((uint32_t)(((d) & 0xff) << 24) | \
+			(((c) & 0xff) << 16) | \
+			(((b) & 0xff) << 8)  | \
+			((a) & 0xff))
 
 /* csit-pktgen run mode */
 enum {BINSEARCH, DELAY, FIXRATE, LINSEARCH};
@@ -29,14 +33,14 @@ typedef struct {
 	int stats_interval;
 	int duration; /* run time duration in sec */
 	uint64_t pps;  /* number of transmitted packets per sec, 0 == no delay between packets */
-	int pts; /* quit after transmitting pts packets */
+	uint64_t pts; /* quit after transmitting pts packets */
 
 	unsigned int num_ports;
 	unsigned int num_tx_queues;
 	unsigned int num_rx_queues;
 	unsigned int burst_size;
 
-	int step;
+	uint64_t step;
 	uint64_t min_rate;
 	uint64_t cur_rate;
 	uint64_t max_rate;

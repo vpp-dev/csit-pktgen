@@ -175,6 +175,66 @@ static inline void dump_dpdk_error(uint64_t flags)
 	printf("\n");
 }
 
+static void print_configuration(void)
+{
+	char temp1[64];
+	char temp2[64];
+
+	printf("Current configuration:\n");
+	printf("======================\n");
+	printf("selected test: ");
+	switch(conf->test)
+	{
+		case BINSEARCH:
+			printf("binary search");
+			break;
+
+		case DELAY:
+			printf("delay between packets");
+			break;
+
+		case FIXRATE:
+			printf("fixed rate");
+			break;
+
+		case LINSEARCH:
+			printf("linear search");
+			break;
+	}
+	printf(", status is printed in %is interval, test duration: %is.\n", conf->stats_interval, conf->duration);
+	printf("packet size: %i, IP version: %s\n", conf->packet_size, conf->ipv6 ? "IPv6" : "IPv4");
+	printf("PPS: %lu, PTS: %lu, ports: %i, tx_queues: %i, rx_queues: %i, burst_size: %i\n",
+		   conf->pps, conf->pts, conf->num_ports, conf->num_tx_queues, conf->num_rx_queues, conf->burst_size);
+
+	printf("MAC info:\n");
+	ether_format_addr(temp1, sizeof(temp1),(const struct ether_addr *)&conf->src_mac[0]);
+	ether_format_addr(temp2, sizeof(temp2),(const struct ether_addr *)&conf->dst_mac[0]);
+	printf("%s -> %s\n", temp1, temp2);
+	ether_format_addr(temp1, sizeof(temp1),(const struct ether_addr *)&conf->src_mac[1]);
+	ether_format_addr(temp2, sizeof(temp2),(const struct ether_addr *)&conf->dst_mac[1]);
+	printf("%s -> %s\n", temp1, temp2);
+
+	printf("IP info:\n");
+	if (conf->ipv6)
+	{
+		printf("%s:%u -> %s:%u\n",
+			inet_ntop(AF_INET6, (void *)&conf->src_ip6[0], temp1, sizeof(temp1)), conf->src_port & 0xffff,
+			inet_ntop(AF_INET6, (void *)&conf->dst_ip6[0], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
+		printf("%s:%u -> %s:%u\n",
+			inet_ntop(AF_INET6, (void *)&conf->src_ip6[1], temp1, sizeof(temp1)), conf->src_port & 0xffff,
+			inet_ntop(AF_INET6, (void *)&conf->dst_ip6[1], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
+		} else {
+		printf("%s:%u -> %s:%u\n",
+			inet_ntop(AF_INET, (void *)&conf->src_ip4[0], temp1, sizeof(temp1)), conf->src_port & 0xffff,
+			inet_ntop(AF_INET, (void *)&conf->dst_ip4[0], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
+		printf("%s:%u -> %s:%u\n",
+			inet_ntop(AF_INET, (void *)&conf->src_ip4[1], temp1, sizeof(temp1)), conf->src_port & 0xffff,
+			inet_ntop(AF_INET, (void *)&conf->dst_ip4[1], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
+	}
+
+	printf("======================\n");
+}
+
 static inline void
 calculate_checksum(struct rte_mbuf *pkt)
 {
@@ -230,8 +290,8 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	ip4->next_proto_id   = 17 /* UDP */;
 	ip4->packet_id       = 0;
 	ip4->total_length    = rte_cpu_to_be_16(ptd->pkt_len - sizeof(*eth));
-	ip4->src_addr        = rte_cpu_to_be_32(ptd->src_ip4);
-	ip4->dst_addr        = rte_cpu_to_be_32(ptd->dst_ip4);
+	ip4->src_addr        = ptd->src_ip4;
+	ip4->dst_addr        = ptd->dst_ip4;
 	ip4->hdr_checksum    = 0;
 
 	/* UDP */
@@ -516,10 +576,10 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 			ptd[i].type = THREAD_TX;
 			if (p == 0) {
 				rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[0], 6);
-				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[1], 6);
+				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[0], 6);
 			} else {
 				rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[1], 6);
-				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[0], 6);
+				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[1], 6);
 			}
 			ptd[i].src_ip4 = conf->src_ip4[p];
 			ptd[i].dst_ip4 = conf->dst_ip4[p];
@@ -716,9 +776,11 @@ int main(int argc, char **argv)
 	rte_eth_macaddr_get (1, (void *)&conf->src_mac[1]);
 
 	if (!conf->dst_macs_are_set) {
-		rte_eth_macaddr_get (0, (void *)&conf->src_mac[1]);
-		rte_eth_macaddr_get (1, (void *)&conf->src_mac[0]);
+		rte_eth_macaddr_get (0, (void *)&conf->dst_mac[1]);
+		rte_eth_macaddr_get (1, (void *)&conf->dst_mac[0]);
 	}
+
+	print_configuration();
 
 	signal(SIGINT, signal_stop);
 	signal(SIGALRM, signal_alarm);
