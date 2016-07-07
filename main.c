@@ -26,6 +26,7 @@
 #include <rte_cycles.h>
 #include <rte_ip.h>
 #include <rte_udp.h>
+#include <rte_arp.h>
 
 #include "barrier.h"
 #include "config.h"
@@ -392,8 +393,72 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	return (udp+1);
 }
 
-static int
-lcore_tx_main(__attribute__((unused)) void *arg)
+static inline void prepare_arp(config_t *conf, struct rte_mbuf *pkt, uint16_t arp_opcode, int port)
+{
+	struct ether_hdr * eth;
+	struct arp_hdr * arp;
+	eth = rte_pktmbuf_mtod_offset(pkt, struct ether_hdr *, 0);
+	arp = rte_pktmbuf_mtod_offset(pkt, struct arp_hdr *, sizeof(*eth));
+
+	/* Metadata */
+	pkt->next = 0;
+	pkt->nb_segs = 1;
+	rte_pktmbuf_data_len(pkt) = sizeof(struct ether_hdr) + sizeof(struct arp_hdr);
+	rte_pktmbuf_pkt_len(pkt)  = sizeof(struct ether_hdr) + sizeof(struct arp_hdr);
+
+	/* Ethernet */
+	ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &eth->s_addr);
+	eth->ether_type = rte_cpu_to_be_16(ETHER_TYPE_ARP);
+
+	/* arp */
+	arp->arp_hrd = rte_cpu_to_be_16(ARP_HRD_ETHER);
+	arp->arp_pro = rte_cpu_to_be_16(ETHER_TYPE_IPv4);
+	arp->arp_hln = ETHER_ADDR_LEN;
+	arp->arp_pln = sizeof(uint32_t);
+
+	if (arp_opcode == ARP_OP_REQUEST) {
+		arp->arp_op = rte_cpu_to_be_16(ARP_OP_REQUEST);
+		memset(&eth->d_addr, 0xff, 6);
+		arp->arp_data.arp_sip = conf->src_ip4[port];
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &arp->arp_data.arp_sha);
+		arp->arp_data.arp_tip = conf->dst_ip4[port];
+		memset(&arp->arp_data.arp_tha, 0, 6);
+	}
+
+	if (arp_opcode == ARP_OP_REPLY) {
+		arp->arp_op = rte_cpu_to_be_16(ARP_OP_REPLY);
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &eth->s_addr);
+		ether_addr_copy((const struct ether_addr *)&conf->dst_mac[port], &eth->d_addr);
+
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &arp->arp_data.arp_sha);
+		ether_addr_copy((const struct ether_addr *)&conf->dst_mac[port], &arp->arp_data.arp_tha);
+		port = (port==0)?1:0;  /* swap port */
+		arp->arp_data.arp_sip = conf->dst_ip4[port];
+		arp->arp_data.arp_tip = conf->src_ip4[port];
+	}
+}
+
+static inline void send_arp(config_t *conf)
+{
+	struct rte_mbuf *pkt;
+	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+	prepare_arp(conf, pkt, ARP_OP_REQUEST, 0);
+	rte_eth_tx_burst(0, 0, &pkt, 1);  /* request from port 0 */
+
+	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+	prepare_arp(conf, pkt, ARP_OP_REPLY, 1);
+	rte_eth_tx_burst(1, 0, &pkt, 1);  /* response from port 1 */
+
+	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+	prepare_arp(conf, pkt, ARP_OP_REQUEST, 1);
+	rte_eth_tx_burst(1, 0, &pkt, 1);  /* request from port 1 */
+
+	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+	prepare_arp(conf, pkt, ARP_OP_REPLY, 0);
+	rte_eth_tx_burst(0, 0, &pkt, 1);  /* response from port 0 */
+}
+
+static int lcore_tx_main(__attribute__((unused)) void *arg)
 {
 	int i;
 	unsigned lcore_id;
@@ -474,6 +539,9 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
 	packet_payload *payload;
 	per_thread_data_t * ptd = (per_thread_data_t *) arg;
+	struct ipv4_hdr *ip4;
+ 	struct ipv6_hdr *ip6;
+	struct udp_hdr * udp;
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -486,16 +554,28 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		if (!nb_rx)
 			continue;
 
-		ptd->counters.num_rx_pkts += nb_rx;
-
 		for (i = 0; i < nb_rx; i++) {
-			eth_type = (uint16_t *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *, 12);
-			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6)
+			eth_type = rte_pktmbuf_mtod_offset(pkts[i], uint16_t *, 12);
+
+			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
+				ip6 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv6_hdr *, sizeof(struct ether_hdr));
+
+				payload = rte_pktmbuf_mtod_offset(pkts[i], packet_payload *, sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
+			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv4) {
+				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
+				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip4));
+
+				if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4) ||
+					(rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port)) {
+					continue;
+				}
+
 				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
-					sizeof(struct ether_hdr)+sizeof(struct ipv6_hdr)+sizeof(struct udp_hdr));
-			else
-				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
-					sizeof(struct ether_hdr)+sizeof(struct ipv4_hdr)+sizeof(struct udp_hdr));
+					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
+			} else {
+				rte_pktmbuf_free(pkts[i]);
+				continue;
+			}
 
 			//printf("port %u queue %u tx_timestamp %lu rx_timestamp %lu delte %lu (%lu ns)\n",
 			//       ptd->port, ptd->queue, *tsc1, tsc2, tsc2-*tsc1, TICKS_TO_NSEC(tsc2-*tsc1));
@@ -511,6 +591,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			if (unlikely(pkts[i]->ol_flags & 0xFFFFFFFFFFFFFFF8)) /* mask lowest 3 bits */
 				dump_dpdk_error(pkts[i]->ol_flags);
 
+			ptd->counters.num_rx_pkts++;
 			ptd->counters.num_rx_octets += pkts[i]->pkt_len;
 			rte_pktmbuf_free(pkts[i]);
 		}
@@ -587,7 +668,7 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 			memcpy(ptd[i].dst_ip6, &conf->dst_ip6[p*16], 16);
 
 			ptd[i].src_port = conf->src_port+q;
-			ptd[i].dst_port = conf->dst_port+q;
+			ptd[i].dst_port = conf->dst_port;
 			ptd[i].pkt_len = conf->packet_size;
 
 			__sync_fetch_and_add(b->num_workers,  1);
@@ -595,6 +676,10 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 		} else {
 			ptd[i].queue = q - conf->num_tx_queues;
 			ptd[i].type = THREAD_RX;
+			ptd[i].src_ip4 = conf->src_ip4[(p==1)?0:1];
+			ptd[i].dst_ip4 = conf->dst_ip4[(p==1)?0:1];
+			ptd[i].dst_port = conf->dst_port;
+
 			ptd[i].counters.latency_min = 0xffffffffffffffff;
 			ptd[i].counters.latency_max = 0;
 			__sync_fetch_and_add(b->num_workers,  1);
@@ -617,32 +702,26 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 typedef enum {RATE_START, RATE_UP, RATE_DOWN} updown;
 static uint64_t binsrch_get_next_pps(updown direction)
 {
-	uint64_t interval;
-	uint64_t rate;
-
 	switch(direction)
 	{
 		case RATE_START:
-			interval = conf->max_rate - conf->min_rate;
-			rate = conf->min_rate + interval / 2;
-			printf("Linerate %lu Mbit/s (%lu pps).\n", rate/1000000, rate_to_pps(rate));
+			conf->step_min = 0;
+			conf->step_max = (conf->max_rate - conf->min_rate) / conf->step;
+			conf->cur_rate = (conf->step_max / 2) * conf->step;
 			break;
 
 		case RATE_UP:
-			conf->min_rate = conf->cur_rate;
-			interval = conf->max_rate - conf->min_rate;
-			rate = conf->min_rate + interval / 2;
+			conf->step_min = conf->cur_rate / conf->step;
+			conf->cur_rate += ((conf->step_max - conf->step_min) / 2) * conf->step;
 			break;
 
 		case RATE_DOWN:
-			conf->max_rate = conf->cur_rate;
-			interval = conf->max_rate - conf->min_rate;
-			rate = conf->min_rate + interval / 2;
+			conf->step_max = conf->cur_rate / conf->step;
+			conf->cur_rate -= ((conf->step_max - conf->step_min) / 2) * conf->step;
 			break;
 	}
 
-	conf->cur_rate = rate;
-	return rate_to_pps(rate);
+	return rate_to_pps(conf->cur_rate + conf->min_rate);
 }
 
 static uint64_t linsrch_get_next_pps(updown direction)
@@ -758,7 +837,7 @@ int main(int argc, char **argv)
 	int i;
 	per_thread_data_t * ptd = NULL, * interval_copy;
 	int num_threads;
-	uint64_t packetloss, old_pps=0;
+	uint64_t lost, lostpercent, old_packetloss=0, old_pps=0;
 
 	for (i=0; i<argc; i++)
 		if ((!strncmp(argv[i], "--", 2)) && (strlen(argv[i]) == 2))
@@ -832,6 +911,9 @@ int main(int argc, char **argv)
 								" port=%d\n", ret, p);
 	}
 
+	send_arp(conf);
+	sleep(4);
+
 	b = worker_barrier_init();
 	switch(conf->test) {
 		case BINSEARCH:
@@ -868,14 +950,18 @@ int main(int argc, char **argv)
 				printf("\n");
 				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
 
-				packetloss = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
-				if (packetloss < (uint64_t)conf->drop)
+				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
+				lostpercent = (lost*100) / runtime_cnt.num_tx_pkts;
+				printf("Current rate: %lu bps (%lu pps), lost %lu (%lu %%)\n",
+					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
+
+				if (lost < (uint64_t)conf->drop)
 				{
 					conf->pps = binsrch_get_next_pps(RATE_UP);
 					printf("Increasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 				}
 
-				if (packetloss > (uint64_t)conf->drop)
+				if (lost > (uint64_t)conf->drop)
 				{
 					conf->pps = binsrch_get_next_pps(RATE_DOWN);
 					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
@@ -883,16 +969,19 @@ int main(int argc, char **argv)
 
 				if (old_pps == conf->pps)
 				{
-					if (packetloss > (uint64_t)conf->drop)
-						printf("Rate not found !\n");
-					else
+					if (lost <= (uint64_t)conf->drop)
 						printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					else if (old_packetloss <= (uint64_t)conf->drop)
+						printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(old_pps), old_pps);
+					else
+						printf("Rate not found !\n");
 					exit(0);
 				}
 
 				memset(&runtime_cnt, 0, sizeof(counters));
 				runtime_cnt.latency_min = 0xffffffffffffffff;
 				old_pps = conf->pps;
+				old_packetloss = lost;
 				ptd = launch_threads(ptd); // relaunch again
 				continue;
 			}
@@ -910,8 +999,11 @@ int main(int argc, char **argv)
 				printf("\n");
 				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
 
-				packetloss = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
-				if (packetloss > (uint64_t)conf->drop)
+				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
+				lostpercent = (lost*100) / runtime_cnt.num_tx_pkts;
+				printf("Current rate: %lu bps (%lu pps), lost %lu (%lu %%)\n",
+					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
+				if (lost > (uint64_t)conf->drop)
 				{
 					conf->pps = linsrch_get_next_pps(RATE_DOWN);
 					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);

@@ -44,6 +44,8 @@ typedef struct {
 	uint64_t min_rate;
 	uint64_t cur_rate;
 	uint64_t max_rate;
+	uint64_t step_min;
+	uint64_t step_max;
 	int drop;
 
 	int packet_size;
