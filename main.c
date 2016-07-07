@@ -837,7 +837,8 @@ int main(int argc, char **argv)
 	int i;
 	per_thread_data_t * ptd = NULL, * interval_copy;
 	int num_threads;
-	uint64_t lost, lostpercent, old_packetloss=0, old_pps=0;
+	uint64_t lost, old_pps=0, last_valid_pps=0;
+	float lostpercent=0;
 
 	for (i=0; i<argc; i++)
 		if ((!strncmp(argv[i], "--", 2)) && (strlen(argv[i]) == 2))
@@ -921,6 +922,9 @@ int main(int argc, char **argv)
 	switch(conf->test) {
 		case BINSEARCH:
 			conf->pps = binsrch_get_next_pps(RATE_START);
+			printf("Binary search: current rate: %lu bps (%lu pps)\n",
+				   pps_to_rate(conf->pps), conf->pps);
+			old_pps = conf->pps;
 			break;
 
 		case LINSEARCH:
@@ -954,17 +958,18 @@ int main(int argc, char **argv)
 				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
 
 				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
-				lostpercent = (lost*100) / runtime_cnt.num_tx_pkts;
-				printf("Current rate: %lu bps (%lu pps), lost %lu (%lu %%)\n",
+				lostpercent = ((float)lost*100) / (float)runtime_cnt.num_tx_pkts;
+				printf("Current rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
 
-				if (lost < (uint64_t)conf->drop)
+				if (lostpercent < conf->drop)
 				{
+					last_valid_pps = conf->pps;
 					conf->pps = binsrch_get_next_pps(RATE_UP);
 					printf("Increasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 				}
 
-				if (lost > (uint64_t)conf->drop)
+				if (lostpercent > conf->drop)
 				{
 					conf->pps = binsrch_get_next_pps(RATE_DOWN);
 					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
@@ -972,19 +977,15 @@ int main(int argc, char **argv)
 
 				if (old_pps == conf->pps)
 				{
-					if (lost <= (uint64_t)conf->drop)
-						printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
-					else if (old_packetloss <= (uint64_t)conf->drop)
-						printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(old_pps), old_pps);
-					else
-						printf("Rate not found !\n");
+					if (lostpercent > (uint64_t)conf->drop)
+						conf->pps = last_valid_pps;
+					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 					exit(0);
 				}
 
 				memset(&runtime_cnt, 0, sizeof(counters));
 				runtime_cnt.latency_min = 0xffffffffffffffff;
 				old_pps = conf->pps;
-				old_packetloss = lost;
 				ptd = launch_threads(ptd); // relaunch again
 				continue;
 			}
@@ -1003,10 +1004,10 @@ int main(int argc, char **argv)
 				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
 
 				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
-				lostpercent = (lost*100) / runtime_cnt.num_tx_pkts;
-				printf("Current rate: %lu bps (%lu pps), lost %lu (%lu %%)\n",
+				lostpercent = ((float)lost*100) / (float)runtime_cnt.num_tx_pkts;
+				printf("Current rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
-				if (lost > (uint64_t)conf->drop)
+				if (lostpercent > conf->drop)
 				{
 					conf->pps = linsrch_get_next_pps(RATE_DOWN);
 					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);

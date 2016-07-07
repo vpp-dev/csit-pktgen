@@ -356,7 +356,7 @@ int parse_cmdline(int argc, char **argv)
 			break;
 
 		case DROP:
-			config.drop = verify_uint64(optarg);
+			sscanf(optarg, "%f", &config.drop);
 			break;
 
 		case IPV6:
