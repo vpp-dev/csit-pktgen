@@ -51,6 +51,7 @@ typedef struct {
 	int packet_size;
 	int dst_macs_are_set;
 	int ipv6;
+	int arp_delay; /* delay in seconds after sending ARP packet */
 	mac_t src_mac[2];
 	mac_t dst_mac[2];
 

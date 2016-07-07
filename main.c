@@ -912,7 +912,10 @@ int main(int argc, char **argv)
 	}
 
 	send_arp(conf);
-	sleep(4);
+	if (conf->arp_delay) {
+		printf("Waiting %i seconds after ARP...\n", conf->arp_delay);
+		sleep(conf->arp_delay);
+	}
 
 	b = worker_barrier_init();
 	switch(conf->test) {

@@ -32,6 +32,7 @@ static config_t config = {
 	.packet_size = 64,
 	.dst_macs_are_set = 0,
 	.ipv6 = 0,
+	.arp_delay = 0,
 
 	.src_ip4 = {IPv4_NS(172, 16, 0, 1), IPv4_NS(172, 16, 1, 1)},
 	.dst_ip4 = {IPv4_NS(172, 16, 0, 2), IPv4_NS(172, 16, 1, 2)},
@@ -225,7 +226,7 @@ int parse_cmdline(int argc, char **argv)
 	int c;
 
 	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES,
-		NUM_RX_QUEUES, BURST_SIZE, PACKET_SIZE, IPV6, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS,
+		NUM_RX_QUEUES, BURST_SIZE, PACKET_SIZE, IPV6, ARP_DELAY, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS,
 		MIN_RATE, MAX_RATE, DROP, STEP};
 
 	while (1)
@@ -252,6 +253,7 @@ int parse_cmdline(int argc, char **argv)
 
 		{"packet-size",   required_argument, 0, PACKET_SIZE},
 		{"ipv6",          no_argument,       0, IPV6},
+		{"arp-delay",     required_argument, 0, ARP_DELAY},
 		{"src-ips",       required_argument, 0, SRC_IPS},
 		{"dst-ips",       required_argument, 0, DST_IPS},
 		{"udp-ports",     required_argument, 0, UDP_PORTS},
@@ -359,6 +361,10 @@ int parse_cmdline(int argc, char **argv)
 
 		case IPV6:
 			config.ipv6 = 1;
+			break;
+
+		case ARP_DELAY:
+			config.arp_delay = verify_int(optarg);
 			break;
 
 		case BURST_SIZE:
