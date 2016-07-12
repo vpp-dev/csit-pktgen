@@ -148,7 +148,7 @@ counters runtime_cnt = {0};
 static inline void dump_dpdk_error(uint64_t flags)
 {
 	printf("received packet with DPDK errors: ");
-	__asm__("int $3");
+
 	if (flags & PKT_RX_L4_CKSUM_BAD)
 		printf("L4 cksum of RX pkt. is not OK.\n");
 	if (flags & PKT_RX_IP_CKSUM_BAD)
@@ -441,13 +441,10 @@ static inline void prepare_arp(config_t *conf, struct rte_mbuf *pkt, uint16_t ar
 static inline void send_arp(config_t *conf)
 {
 	struct rte_mbuf *pkt;
+
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 0);
 	rte_eth_tx_burst(0, 0, &pkt, 1);  /* request from port 0 */
-
-	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
-	prepare_arp(conf, pkt, ARP_OP_REPLY, 1);
-	rte_eth_tx_burst(1, 0, &pkt, 1);  /* response from port 1 */
 
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 1);
@@ -456,6 +453,10 @@ static inline void send_arp(config_t *conf)
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REPLY, 0);
 	rte_eth_tx_burst(0, 0, &pkt, 1);  /* response from port 0 */
+
+	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+	prepare_arp(conf, pkt, ARP_OP_REPLY, 1);
+	rte_eth_tx_burst(1, 0, &pkt, 1);  /* response from port 1 */
 }
 
 static int lcore_tx_main(__attribute__((unused)) void *arg)
