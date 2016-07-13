@@ -132,7 +132,7 @@ typedef struct {
 	uint32_t dst_ip6[16];
 	uint32_t src_port;
 	uint32_t dst_port;
-	uint64_t delay; /* delay between packets, calculated ad thread start frpm pps */
+	uint64_t delay; /* delay between packets, calculated at thread start from pps */
 	uint64_t pts; /* number of packets to send by this thread */
 
 	counters counters;
@@ -145,6 +145,7 @@ typedef struct {
 
 counters runtime_cnt = {0};
 
+/* Shows DPDK error on stdout. Called from RX func. */
 static inline void dump_dpdk_error(uint64_t flags)
 {
 	printf("received packet with DPDK errors: ");
@@ -236,6 +237,7 @@ static void print_configuration(void)
 	printf("======================\n");
 }
 
+/* Calculates ipv4 hdr checksum and ipv4,6 UDP checksum. */
 static inline void
 calculate_checksum(struct rte_mbuf *pkt)
 {
@@ -262,6 +264,7 @@ calculate_checksum(struct rte_mbuf *pkt)
 	}
 }
 
+/* Fills ethernet, ipv4 and UDP header in packet. Returns pointer to UDP payload. */
 static inline void *
 craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 {
@@ -330,6 +333,7 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	return (udp+1);
 }
 
+/* Fills ethernet, ipv6 and UDP header in packet. Returns pointer to UDP payload. */
 static inline void *
 craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 {
@@ -393,6 +397,7 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 	return (udp+1);
 }
 
+/* Prepares ARP packet. */
 static inline void prepare_arp(config_t *conf, struct rte_mbuf *pkt, uint16_t arp_opcode, int port)
 {
 	struct ether_hdr * eth;
@@ -438,6 +443,7 @@ static inline void prepare_arp(config_t *conf, struct rte_mbuf *pkt, uint16_t ar
 	}
 }
 
+/* Sends 4 ARP packets */
 static inline void send_arp(config_t *conf)
 {
 	struct rte_mbuf *pkt;
@@ -459,6 +465,7 @@ static inline void send_arp(config_t *conf)
 	rte_eth_tx_burst(1, 0, &pkt, 1);  /* response from port 1 */
 }
 
+/* Main transmit function */
 static int lcore_tx_main(__attribute__((unused)) void *arg)
 {
 	int i;
@@ -469,7 +476,7 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 	struct rte_mbuf *pkts[MAX_PKT_BURST];
 	int pkts_in_round = conf->burst_size;
 	int pkts_sent;
-	int pts_present = 0;
+	int pts_present = 0; /* was "packets to send" set ? */
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u TX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -483,11 +490,13 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 		tsc = rte_rdtsc();
 
+		/* Is number of "packets to send" set ? */
 		if(unlikely(ptd->pts)) {
 			pts_present = 1;
 			pkts_in_round = (ptd->pts > (uint64_t)conf->burst_size) ? conf->burst_size : ptd->pts;
 		}
 
+		/* Is "delay between packets" set ? */
 		if(unlikely(ptd->delay)) {
 			pkts_in_round = 1;
 			if (tsc < (last_run_tsc + ptd->delay))
@@ -496,14 +505,14 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 		last_run_tsc = tsc;
 
 		for (i=0; i<pkts_in_round; i++) {
-			pkts[i] = rte_pktmbuf_alloc(pktmbuf_pool);
+			pkts[i] = rte_pktmbuf_alloc(pktmbuf_pool); /* allocate packet memory */
 
-			if (!conf->ipv6)
+			if (!conf->ipv6) /* fill headers */
 				payload = craft_packet_ipv4(ptd, pkts[i]);
 			else
 				payload = craft_packet_ipv6(ptd, pkts[i]);
 
-			payload->tsc = rte_rdtsc();
+			payload->tsc = rte_rdtsc(); /* put tsc into payload and recalculate checksum */
 			calculate_checksum(pkts[i]);
 		}
 
@@ -514,6 +523,7 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 		for (i=0; i<pkts_in_round; i++)
 			rte_pktmbuf_free(pkts[i]);
 
+		/* Was all "packets to send" sent ? If yes, stop thread. */
 		if(unlikely(pts_present)) {
 			ptd->pts -= pkts_sent;
 			if (!ptd->pts) {
@@ -522,13 +532,16 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 			}
 		}
 	}
-	if (tx_threads_stopped == conf->num_tx_queues * conf->num_ports) { /* this was the last thread */
+
+	/* this was the last thread - send ALARM signal to the main thread */
+	if (tx_threads_stopped == conf->num_tx_queues * conf->num_ports) {
 		kill(0, SIGALRM);
 	}
 	__sync_fetch_and_add(b->num_workers, -1);
 	return 0;
 }
 
+/* Main receive function */
 static int
 lcore_rx_main(__attribute__((unused)) void *arg)
 {
@@ -558,22 +571,27 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		for (i = 0; i < nb_rx; i++) {
 			eth_type = rte_pktmbuf_mtod_offset(pkts[i], uint16_t *, 12);
 
+			/* handle IPv6 */
 			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
 				ip6 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv6_hdr *, sizeof(struct ether_hdr));
 
 				payload = rte_pktmbuf_mtod_offset(pkts[i], packet_payload *, sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
+				/* handle IPv4 */
 			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv4) {
 				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
 				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip4));
 
+				/* Is it our packet ? check addr && dst ports */
 				if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4) ||
 					(rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port)) {
 					continue;
 				}
 
+				/* Set payload to UDP payload */
 				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
 			} else {
+				/* this was not IP packet, free memory && continue*/
 				rte_pktmbuf_free(pkts[i]);
 				continue;
 			}
@@ -583,15 +601,18 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			//hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 			latency = tsc2-payload->tsc;
 
+			/* set min/max and sum latency */
 			ptd->counters.latency_sum += latency;
 			if (latency < ptd->counters.latency_min)
 				ptd->counters.latency_min = latency;
 			if (latency > ptd->counters.latency_max)
 				ptd->counters.latency_max = latency;
 
+			/* Was there any DPDK error ? */
 			if (unlikely(pkts[i]->ol_flags & 0xFFFFFFFFFFFFFFF8)) /* mask lowest 3 bits */
 				dump_dpdk_error(pkts[i]->ol_flags);
 
+			/* Inc counters && free memory */
 			ptd->counters.num_rx_pkts++;
 			ptd->counters.num_rx_octets += pkts[i]->pkt_len;
 			rte_pktmbuf_free(pkts[i]);
@@ -604,15 +625,18 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 enum { QUIT_CTRL_C=1, QUIT_ALARM };
 static void signal_stop(__attribute__((unused)) int signal)
 {
+	/* CTRL+C keypress from terminal handler */
 	printf("\nSIGSTOP received, exitting...\n");
 	should_quit = QUIT_CTRL_C;
 }
 
 static void signal_alarm(__attribute__((unused)) int signal)
 {
+	/* SIGALRM handler. SIGALRM is sent from last running RX thread */
 	should_quit = QUIT_ALARM;
 }
 
+/* Calculate time diff. Used for latency calculation. */
 static uint64_t clock_diff(struct timespec start, struct timespec end)
 {
 	struct timespec temp;
@@ -626,6 +650,7 @@ static uint64_t clock_diff(struct timespec start, struct timespec end)
 	return temp.tv_sec*1000+temp.tv_nsec/1000000;
 }
 
+/* Start DPDK RX/TX threads */
 static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 {
 	int lcore_id;
@@ -635,6 +660,7 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 	if (ptd)
 		free(ptd);
 
+	/* Allocate cache-alligned per thread data */
 	ptd = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
 	memset(ptd, 0, num_threads * sizeof(per_thread_data_t));
 
@@ -651,6 +677,7 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 		ptd[i].lcore_id = lcore_id;
 
 		if (q < conf->num_tx_queues) {
+			/* prepare TX threads */
 			if (conf->pps)
 				ptd[i].delay = ticks_per_sec / (conf->pps / conf->num_tx_queues);
 			ptd[i].pts = conf->pts / conf->num_tx_queues;
@@ -672,9 +699,11 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 			ptd[i].dst_port = conf->dst_port;
 			ptd[i].pkt_len = conf->packet_size;
 
+			/* and launch it */
 			__sync_fetch_and_add(b->num_workers,  1);
 			rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
 		} else {
+			/* prepare RX threads */
 			ptd[i].queue = q - conf->num_tx_queues;
 			ptd[i].type = THREAD_RX;
 			ptd[i].src_ip4 = conf->src_ip4[(p==1)?0:1];
@@ -683,6 +712,8 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 
 			ptd[i].counters.latency_min = 0xffffffffffffffff;
 			ptd[i].counters.latency_max = 0;
+
+			/* and launch it */
 			__sync_fetch_and_add(b->num_workers,  1);
 			rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
 		}
@@ -694,6 +725,7 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 		}
 	}
 
+	/* If test duration was set, set up alarm. Alarm callback will shut down pktgen */
 	if (conf->duration)
 		alarm(conf->duration);
 
@@ -748,6 +780,7 @@ static uint64_t linsrch_get_next_pps(updown direction)
 	return rate_to_pps(rate);
 }
 
+/* Sum stats from per thread data */
 static void calculate_runtime_counters(counters *runtime_cnt, per_thread_data_t * ptd, int num_threads)
 {
 	int q;
@@ -774,6 +807,7 @@ static void calculate_runtime_counters(counters *runtime_cnt, per_thread_data_t 
 	}
 }
 
+/* Dump per thread stats to stdout */
 static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
 {
 	int q;
@@ -812,6 +846,7 @@ static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
 	}
 }
 
+/* Dump final stats to stdout */
 static void dump_final_stats(counters *ctr, uint64_t time_diff)
 {
 	printf("%lu packets transmitted, %lu received, lost %lu (%i%% packet loss), time %lu ms\n",
@@ -841,6 +876,9 @@ int main(int argc, char **argv)
 	uint64_t lost, old_pps=0, last_valid_pps=0;
 	float lostpercent=0;
 
+	/* check if "--" is present on command line. ("--" is separator for DPDK and pktgen
+	 * cmdline arguments) csit-pktgen [dpdk-args] -- [pktgen args]
+	 */
 	for (i=0; i<argc; i++)
 		if ((!strncmp(argv[i], "--", 2)) && (strlen(argv[i]) == 2))
 			break;
@@ -851,8 +889,10 @@ int main(int argc, char **argv)
 	if (ret < 0)
 		rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
 
+	/* get pointer to config struct */
 	conf = get_config();
 
+	/* get NIC MACs */
 	rte_eth_macaddr_get (0, (void *)&conf->src_mac[0]);
 	rte_eth_macaddr_get (1, (void *)&conf->src_mac[1]);
 
@@ -913,6 +953,7 @@ int main(int argc, char **argv)
 								" port=%d\n", ret, p);
 	}
 
+	/* send ARP first */
 	send_arp(conf);
 	if (conf->arp_delay) {
 		printf("Waiting %i seconds after ARP...\n", conf->arp_delay);
@@ -920,6 +961,7 @@ int main(int argc, char **argv)
 	}
 
 	b = worker_barrier_init();
+	/* init binary or linear search */
 	switch(conf->test) {
 		case BINSEARCH:
 			conf->pps = binsrch_get_next_pps(RATE_START);
@@ -965,6 +1007,7 @@ int main(int argc, char **argv)
 
 				if (lostpercent < conf->drop)
 				{
+					/* packetloss is bellow drop %, increase rate */
 					last_valid_pps = conf->pps;
 					conf->pps = binsrch_get_next_pps(RATE_UP);
 					printf("Increasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
@@ -972,6 +1015,7 @@ int main(int argc, char **argv)
 
 				if (lostpercent > conf->drop)
 				{
+					/* packetloss is above drop %, decrease rate */
 					conf->pps = binsrch_get_next_pps(RATE_DOWN);
 					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 				}
@@ -992,6 +1036,7 @@ int main(int argc, char **argv)
 			}
 
 			if (conf->test == LINSEARCH) {
+				/* linear search is starting at maxrate and decreases speed by step */
 				tx_should_stop = 1; // stop TX
 				clock_gettime(CLOCK_MONOTONIC, &actual);
 				sleep(1); // time to flush network card buffers
@@ -1010,6 +1055,7 @@ int main(int argc, char **argv)
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
 				if (lostpercent > conf->drop)
 				{
+					/* packetloss is above drop , decrease rate */
 					conf->pps = linsrch_get_next_pps(RATE_DOWN);
 					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 				} else
@@ -1043,6 +1089,7 @@ int main(int argc, char **argv)
 		dump_ptd_stats(interval_copy, num_threads);
 	}
 
+	/* fixrate test ends here */
 	printf("Stopping Tx threads and waiting for Rx threads to finish\n");
 	tx_should_stop = 1;
 	clock_gettime(CLOCK_MONOTONIC, &actual);

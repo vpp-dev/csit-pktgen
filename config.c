@@ -74,6 +74,7 @@ static void print_usage(void)
 	printf("\nUse --help for syntax\nExiting !\n\n"); \
 	exit(-1);}
 
+/* verify if *value contains numeric value */
 static int verify_int(char *value)
 {
 	int x = 0;
@@ -88,6 +89,7 @@ static int verify_int(char *value)
 	return atoi(value);
 }
 
+/* verify if *value contains numeric value */
 static uint64_t verify_uint64(char *value)
 {
 	int x = 0;
@@ -103,6 +105,7 @@ static uint64_t verify_uint64(char *value)
 	return (uint64_t)strtoull(value, &pEnd, 10);
 }
 
+/* parse MAC addrs separated with "," and store it into config.dst_mac */
 static int parse_macs(char *str)
 {
 	uint8_t *bytes = (uint8_t *)&config.dst_mac[0];
@@ -124,6 +127,9 @@ static int parse_macs(char *str)
 	return 1;
 }
 
+/* parse ipv4 or ipv6 ip addr separated with "," if src_dst == 1 ips are stored into config.src_ip*
+ * oitherwise into config.dst_ip*
+ */
 static int parse_ips(char *str, int src_dst)
 {
 	struct addrinfo hint, *res = NULL;
@@ -177,6 +183,7 @@ static int parse_ips(char *str, int src_dst)
 }
 
 #define TMPSIZE 64
+/* parse ports separated with "," */
 static int parse_ports(char *str)
 {
 	char port1[TMPSIZE], port2[TMPSIZE];
@@ -216,6 +223,7 @@ static int parse_ports(char *str)
 
 #define dbg(str, ...) printf("CONFIG: "); printf(str, ##__VA_ARGS__);
 
+/* TODO: check if configuration is valid. */
 static void validate_configuration(void)
 {
 
