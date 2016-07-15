@@ -97,8 +97,8 @@ static struct rte_eth_conf port_conf = {
 };
 
 typedef enum {
-	THREAD_RX,
-	THREAD_TX
+	THREAD_RX=1,
+	THREAD_TX=2
 } thread_type_t;
 
 typedef struct {
@@ -571,8 +571,12 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		for (i = 0; i < nb_rx; i++) {
 			eth_type = rte_pktmbuf_mtod_offset(pkts[i], uint16_t *, 12);
 
+			/* handle ARP */
+			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_ARP) {
+ 				printf("Received arp packet !\n"); fflush(stdout);
+				continue;
 			/* handle IPv6 */
-			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
+			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
 				ip6 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv6_hdr *, sizeof(struct ether_hdr));
 
 				payload = rte_pktmbuf_mtod_offset(pkts[i], packet_payload *, sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
@@ -592,6 +596,8 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
 			} else {
 				/* this was not IP packet, free memory && continue*/
+				printf("UNKNOWN PACKET !\n"); fflush(stdout);
+// 				hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 				rte_pktmbuf_free(pkts[i]);
 				continue;
 			}
@@ -651,7 +657,7 @@ static uint64_t clock_diff(struct timespec start, struct timespec end)
 }
 
 /* Start DPDK RX/TX threads */
-static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
+static per_thread_data_t * launch_threads(per_thread_data_t * ptd, thread_type_t rxtx)
 {
 	int lcore_id;
 	unsigned int p, q, d;
@@ -677,45 +683,51 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd)
 		ptd[i].lcore_id = lcore_id;
 
 		if (q < conf->num_tx_queues) {
-			/* prepare TX threads */
-			if (conf->pps)
-				ptd[i].delay = ticks_per_sec / (conf->pps / conf->num_tx_queues);
-			ptd[i].pts = conf->pts / conf->num_tx_queues;
-			ptd[i].queue = q;
-			ptd[i].type = THREAD_TX;
-			if (p == 0) {
-				rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[0], 6);
-				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[0], 6);
-			} else {
-				rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[1], 6);
-				rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[1], 6);
+			if (rxtx & THREAD_TX) {
+
+				/* prepare TX threads */
+				if (conf->pps)
+					ptd[i].delay = ticks_per_sec / (conf->pps / conf->num_tx_queues);
+				ptd[i].pts = conf->pts / conf->num_tx_queues;
+				ptd[i].queue = q;
+				ptd[i].type = THREAD_TX;
+				if (p == 0) {
+					rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[0], 6);
+					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[0], 6);
+				} else {
+					rte_memcpy(&ptd[i].src_mac, (const void *)&conf->src_mac[1], 6);
+					rte_memcpy(&ptd[i].dst_mac, (const void *)&conf->dst_mac[1], 6);
+				}
+				ptd[i].src_ip4 = conf->src_ip4[p];
+				ptd[i].dst_ip4 = conf->dst_ip4[p];
+				memcpy(ptd[i].src_ip6, &conf->src_ip6[p*16], 16);
+				memcpy(ptd[i].dst_ip6, &conf->dst_ip6[p*16], 16);
+
+				ptd[i].src_port = conf->src_port+q;
+				ptd[i].dst_port = conf->dst_port;
+				ptd[i].pkt_len = conf->packet_size;
+
+				/* and launch it */
+				__sync_fetch_and_add(b->num_workers,  1);
+				rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
 			}
-			ptd[i].src_ip4 = conf->src_ip4[p];
-			ptd[i].dst_ip4 = conf->dst_ip4[p];
-			memcpy(ptd[i].src_ip6, &conf->src_ip6[p*16], 16);
-			memcpy(ptd[i].dst_ip6, &conf->dst_ip6[p*16], 16);
-
-			ptd[i].src_port = conf->src_port+q;
-			ptd[i].dst_port = conf->dst_port;
-			ptd[i].pkt_len = conf->packet_size;
-
-			/* and launch it */
-			__sync_fetch_and_add(b->num_workers,  1);
-			rte_eal_remote_launch(lcore_tx_main, &ptd[i], lcore_id);
 		} else {
-			/* prepare RX threads */
-			ptd[i].queue = q - conf->num_tx_queues;
-			ptd[i].type = THREAD_RX;
-			ptd[i].src_ip4 = conf->src_ip4[(p==1)?0:1];
-			ptd[i].dst_ip4 = conf->dst_ip4[(p==1)?0:1];
-			ptd[i].dst_port = conf->dst_port;
+			if (rxtx & THREAD_RX) {
 
-			ptd[i].counters.latency_min = 0xffffffffffffffff;
-			ptd[i].counters.latency_max = 0;
+				/* prepare RX threads */
+				ptd[i].queue = q - conf->num_tx_queues;
+				ptd[i].type = THREAD_RX;
+				ptd[i].src_ip4 = conf->src_ip4[(p==1)?0:1];
+				ptd[i].dst_ip4 = conf->dst_ip4[(p==1)?0:1];
+				ptd[i].dst_port = conf->dst_port;
 
-			/* and launch it */
-			__sync_fetch_and_add(b->num_workers,  1);
-			rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
+				ptd[i].counters.latency_min = 0xffffffffffffffff;
+				ptd[i].counters.latency_max = 0;
+
+				/* and launch it */
+				__sync_fetch_and_add(b->num_workers,  1);
+				rte_eal_remote_launch(lcore_rx_main, &ptd[i], lcore_id);
+			}
 		}
 
 		q++;
@@ -953,14 +965,21 @@ int main(int argc, char **argv)
 								" port=%d\n", ret, p);
 	}
 
+	/* init barier for synchronizing threads */
+	b = worker_barrier_init();
+
 	/* send ARP first */
+	launch_threads(ptd, THREAD_RX);
+
 	send_arp(conf);
 	if (conf->arp_delay) {
 		printf("Waiting %i seconds after ARP...\n", conf->arp_delay);
 		sleep(conf->arp_delay);
 	}
+	rx_should_stop = 1; // stop RX threads
+	rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
+	rx_should_stop = 0;
 
-	b = worker_barrier_init();
 	/* init binary or linear search */
 	switch(conf->test) {
 		case BINSEARCH:
@@ -976,7 +995,7 @@ int main(int argc, char **argv)
 	}
 
 	interval_copy = aligned_alloc(64, num_threads * sizeof(per_thread_data_t));
-	ptd = launch_threads(ptd);
+	ptd = launch_threads(ptd, THREAD_RX|THREAD_TX);
 
 	runtime_cnt.latency_min = 0xffffffffffffffff;
 
@@ -1031,7 +1050,7 @@ int main(int argc, char **argv)
 				memset(&runtime_cnt, 0, sizeof(counters));
 				runtime_cnt.latency_min = 0xffffffffffffffff;
 				old_pps = conf->pps;
-				ptd = launch_threads(ptd); // relaunch again
+				ptd = launch_threads(ptd, THREAD_RX|THREAD_TX); // relaunch again
 				continue;
 			}
 
@@ -1072,7 +1091,7 @@ int main(int argc, char **argv)
 				memset(&runtime_cnt, 0, sizeof(counters));
 				runtime_cnt.latency_min = 0xffffffffffffffff; /* set maximum latency */
 				old_pps = conf->pps;
-				ptd = launch_threads(ptd); // relaunch again
+				ptd = launch_threads(ptd, THREAD_RX|THREAD_TX); // relaunch again
 				continue;
 			}
 
