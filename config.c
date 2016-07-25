@@ -48,25 +48,7 @@ config_t *get_config(void)
 
 static void print_usage(void)
 {
-	printf("usage:\ncsit-pktgen [dpdk-args] -- [pktgen args]\n\n"
-		   "  --help - this help\n"
-		   "  --stats-interval [n] - wait [n] seconds between printing statistics\n"
-		   "  --duration n - stop after n seconds\n"
-		   "  --pps [n] - transmit [n] packets per seconds\n"
-		   "  --pts [n] - quit after transmitting [n] packets (on all directions)\n"
-		   "\n"
-		   "  --ipv6 - use ipv6 instead of ipv4\n"
-		   "  --packet-size [n] - packet size in [n] bytes including header\n"
-		   "  --src-ips [a,b] - source IP addr\n"
-		   "  --dst-ips [a,b] - destination IP addr\n"
-		   "  --udp-ports [a,b] - udp ports used for communication\n"
-		   "  --dst-macs [a,b] - set MAC addrs for ethernet ports\n"
-		   "\n"
-		   "  --num-ports - number of physical ethernet port used\n"
-		   "  --num-tx-queues - number of transmit processing threads\n"
-		   "  --num-rx-queues - number of receive processing threads\n"
-		   "\n"
-		);
+	printf("Documentation is available at https://wiki.cisco.com/display/VPP/lw-pktgn+documentation\n");
 }
 
 #define die(err, ...) { \
@@ -130,7 +112,8 @@ static int parse_macs(char *str)
 /* parse ipv4 or ipv6 ip addr separated with "," if src_dst == 1 ips are stored into config.src_ip*
  * oitherwise into config.dst_ip*
  */
-static int parse_ips(char *str, int src_dst)
+typedef enum {SOURCE, DESTINATION} srcdst;
+static int parse_ips(char *str, srcdst src_dst)
 {
 	struct addrinfo hint, *res = NULL;
 	int ret, is_ipv4;
@@ -152,7 +135,7 @@ static int parse_ips(char *str, int src_dst)
 	is_ipv4 = (res->ai_family == AF_INET) ? 1 : 0;
 	freeaddrinfo(res);
 
-	if (src_dst == 1) { // source IP addr
+	if (src_dst == SOURCE) { // source IP addr
 		if (is_ipv4) {
 			if (!inet_pton(AF_INET, str, (struct in_addr *)&config.src_ip4[0]))
 				return 1;
@@ -234,8 +217,8 @@ int parse_cmdline(int argc, char **argv)
 	int c;
 
 	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES,
-		NUM_RX_QUEUES, BURST_SIZE, PACKET_SIZE, IPV6, ARP_DELAY, SRC_IPS, DST_IPS, UDP_PORTS, DST_MACS,
-		MIN_RATE, MAX_RATE, DROP, STEP};
+		NUM_RX_QUEUES, BURST_SIZE, PACKET_SIZE, IPV6, ARP_DELAY, SRC_IP_LIST, DST_IP_LIST,
+		UDP_LIST, DST_MACS, MIN_RATE, MAX_RATE, DROP_RATIO, STEP};
 
 	while (1)
 	{
@@ -256,15 +239,15 @@ int parse_cmdline(int argc, char **argv)
 
 		{"min-rate",      required_argument, 0, MIN_RATE},
 		{"max-rate",      required_argument, 0, MAX_RATE},
-		{"drop",          required_argument, 0, DROP},
+		{"drop-ratio",    required_argument, 0, DROP_RATIO},
 		{"step",          required_argument, 0, STEP},
 
 		{"packet-size",   required_argument, 0, PACKET_SIZE},
 		{"ipv6",          no_argument,       0, IPV6},
 		{"arp-delay",     required_argument, 0, ARP_DELAY},
-		{"src-ips",       required_argument, 0, SRC_IPS},
-		{"dst-ips",       required_argument, 0, DST_IPS},
-		{"udp-ports",     required_argument, 0, UDP_PORTS},
+		{"src-ip-list",   required_argument, 0, SRC_IP_LIST},
+		{"dst-ip-list",   required_argument, 0, DST_IP_LIST},
+		{"udp-list",      required_argument, 0, UDP_LIST},
 		{"dst-macs",      required_argument, 0, DST_MACS},
 
 		{0, 0, 0, 0}};
@@ -336,19 +319,19 @@ int parse_cmdline(int argc, char **argv)
 			config.dst_macs_are_set = 1;
 			break;
 
-		case SRC_IPS:
-			if (parse_ips(optarg, 1))
-				die("parameters for --src-ips are invalid (\"%s\")", optarg);
+		case SRC_IP_LIST:
+			if (parse_ips(optarg, SOURCE))
+				die("parameters for --src-ip-list are invalid (\"%s\")", optarg);
 			break;
 
-		case DST_IPS:
-			if (parse_ips(optarg, 2))
-				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
+		case DST_IP_LIST:
+			if (parse_ips(optarg, DESTINATION))
+				die("parameters for --dst-ip-list are invalid (\"%s\")", optarg);
 			break;
 
-		case UDP_PORTS:
+		case UDP_LIST:
 			if (parse_ports(optarg))
-				die("parameters for --dst-ips are invalid (\"%s\")", optarg);
+				die("parameters for --src-udp-list are invalid (\"%s\")", optarg);
 			break;
 
 		case STEP:
@@ -363,8 +346,8 @@ int parse_cmdline(int argc, char **argv)
 			config.max_rate = verify_uint64(optarg);
 			break;
 
-		case DROP:
-			sscanf(optarg, "%f", &config.drop);
+		case DROP_RATIO:
+			sscanf(optarg, "%f", &config.drop_ratio);
 			break;
 
 		case IPV6:

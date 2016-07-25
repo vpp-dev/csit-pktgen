@@ -1024,7 +1024,7 @@ int main(int argc, char **argv)
 				printf("Current rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
 
-				if (lostpercent < conf->drop)
+				if (lostpercent < conf->drop_ratio)
 				{
 					/* packetloss is bellow drop %, increase rate */
 					last_valid_pps = conf->pps;
@@ -1032,7 +1032,7 @@ int main(int argc, char **argv)
 					printf("Increasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 				}
 
-				if (lostpercent > conf->drop)
+				if (lostpercent > conf->drop_ratio)
 				{
 					/* packetloss is above drop %, decrease rate */
 					conf->pps = binsrch_get_next_pps(RATE_DOWN);
@@ -1041,7 +1041,7 @@ int main(int argc, char **argv)
 
 				if (old_pps == conf->pps)
 				{
-					if (lostpercent > (uint64_t)conf->drop)
+					if (lostpercent > (uint64_t)conf->drop_ratio)
 						conf->pps = last_valid_pps;
 					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 					exit(0);
@@ -1072,7 +1072,7 @@ int main(int argc, char **argv)
 				lostpercent = ((float)lost*100) / (float)runtime_cnt.num_tx_pkts;
 				printf("Current rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
-				if (lostpercent > conf->drop)
+				if (lostpercent > conf->drop_ratio)
 				{
 					/* packetloss is above drop , decrease rate */
 					conf->pps = linsrch_get_next_pps(RATE_DOWN);

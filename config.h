@@ -46,7 +46,7 @@ typedef struct {
 	uint64_t max_rate;
 	uint64_t step_min;
 	uint64_t step_max;
-	float drop;
+	float drop_ratio;
 
 	int packet_size;
 	int dst_macs_are_set;
