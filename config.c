@@ -36,8 +36,7 @@ static config_t config = {
 
 	.src_ip4 = {IPv4_NS(172, 16, 0, 1), IPv4_NS(172, 16, 1, 1)},
 	.dst_ip4 = {IPv4_NS(172, 16, 0, 2), IPv4_NS(172, 16, 1, 2)},
-	.src_port = 1024,
-	.dst_port = 2048,
+	.udp_port = 1024,
 
 };
 
@@ -167,39 +166,19 @@ static int parse_ips(char *str, srcdst src_dst)
 
 #define TMPSIZE 64
 /* parse ports separated with "," */
-static int parse_ports(char *str)
+static int parse_port(char *str)
 {
-	char port1[TMPSIZE], port2[TMPSIZE];
-
-	if (strlen(str) > TMPSIZE)
-		return 1;
-
-	if (sscanf(str, "%[^,],%s", port1, port2) != 2)
-		return 1;
-
-	if (!strncmp(port1, "random", 6)) {
-		config.src_port = PORT_RANDOM;
-	} else if (port1[0] == '+') {
-		if (sscanf(port1+1, "%i", &config.src_port) != 1)
+	if (!strncmp(str, "random", 6)) {
+		config.udp_port = PORT_RANDOM;
+	} else if (str[0] == '+') {
+		if (sscanf(str+1, "%i", &config.udp_port) != 1)
 			return 1;
-		config.src_port |= PORT_INCREMENT;
+		config.udp_port |= PORT_INCREMENT;
 	} else
-		if (sscanf(port1, "%i", &config.src_port) != 1)
-		return 1;
-	else
-		config.src_port &= 0xffff;
-
-	if (!strncmp(port2, "random", 6)) {
-		config.dst_port = PORT_RANDOM;
-	} else if (port2[0] == '+') {
-		if (sscanf(port2+1, "%i", &config.dst_port) != 1)
+		if (sscanf(str, "%i", &config.udp_port) != 1)
 			return 1;
-		config.dst_port |= PORT_INCREMENT;
-	} else
-		if (sscanf(port2, "%i", &config.dst_port) != 1)
-		return 1;
-	else
-		config.dst_port &= 0xffff;
+		else
+			config.udp_port &= 0xffff;
 
 	return 0;
 }
@@ -218,7 +197,7 @@ int parse_cmdline(int argc, char **argv)
 
 	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES,
 		NUM_RX_QUEUES, BURST_SIZE, PACKET_SIZE, IPV6, ARP_DELAY, SRC_IP_LIST, DST_IP_LIST,
-		UDP_LIST, DST_MACS, MIN_RATE, MAX_RATE, DROP_RATIO, STEP};
+		UDP_PORT, DST_MAC_LIST, MIN_RATE, MAX_RATE, DROP_RATIO, STEP};
 
 	while (1)
 	{
@@ -247,8 +226,8 @@ int parse_cmdline(int argc, char **argv)
 		{"arp-delay",     required_argument, 0, ARP_DELAY},
 		{"src-ip-list",   required_argument, 0, SRC_IP_LIST},
 		{"dst-ip-list",   required_argument, 0, DST_IP_LIST},
-		{"udp-list",      required_argument, 0, UDP_LIST},
-		{"dst-macs",      required_argument, 0, DST_MACS},
+		{"udp-port",      required_argument, 0, UDP_PORT},
+		{"dst-mac-list",  required_argument, 0, DST_MAC_LIST},
 
 		{0, 0, 0, 0}};
 
@@ -313,9 +292,9 @@ int parse_cmdline(int argc, char **argv)
 			config.packet_size = verify_int(optarg);
 			break;
 
-		case DST_MACS:
+		case DST_MAC_LIST:
 			if (parse_macs(optarg))
-				die("parameters for --dst-macs are invalid (\"%s\")", optarg);
+				die("parameters for --dst-mac-list are invalid (\"%s\")", optarg);
 			config.dst_macs_are_set = 1;
 			break;
 
@@ -329,9 +308,9 @@ int parse_cmdline(int argc, char **argv)
 				die("parameters for --dst-ip-list are invalid (\"%s\")", optarg);
 			break;
 
-		case UDP_LIST:
-			if (parse_ports(optarg))
-				die("parameters for --src-udp-list are invalid (\"%s\")", optarg);
+		case UDP_PORT:
+			if (parse_port(optarg))
+				die("parameters for --udp-port are invalid (\"%s\")", optarg);
 			break;
 
 		case STEP:

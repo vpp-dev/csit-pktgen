@@ -181,6 +181,7 @@ static void print_configuration(void)
 {
 	char temp1[64];
 	char temp2[64];
+	char port_str[32];
 
 	printf("Current configuration:\n");
 	printf("======================\n");
@@ -216,22 +217,29 @@ static void print_configuration(void)
 	ether_format_addr(temp2, sizeof(temp2),(const struct ether_addr *)&conf->dst_mac[1]);
 	printf("%s -> %s\n", temp1, temp2);
 
+	if (conf->udp_port & PORT_INCREMENT)
+		sprintf(port_str, "%i[incremented]", conf->udp_port & 0xffff);
+	else if (conf->udp_port & PORT_RANDOM)
+		sprintf(port_str, "[RANDOM]");
+	else
+		sprintf(port_str, "%i", conf->udp_port & 0xffff);
+
 	printf("IP info:\n");
 	if (conf->ipv6)
 	{
-		printf("%s:%u -> %s:%u\n",
-			inet_ntop(AF_INET6, (void *)&conf->src_ip6[0], temp1, sizeof(temp1)), conf->src_port & 0xffff,
-			inet_ntop(AF_INET6, (void *)&conf->dst_ip6[0], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
-		printf("%s:%u -> %s:%u\n",
-			inet_ntop(AF_INET6, (void *)&conf->src_ip6[1], temp1, sizeof(temp1)), conf->src_port & 0xffff,
-			inet_ntop(AF_INET6, (void *)&conf->dst_ip6[1], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
+		printf("%s:%s -> %s:%s\n",
+			inet_ntop(AF_INET6, (void *)&conf->src_ip6[0], temp1, sizeof(temp1)), port_str,
+			inet_ntop(AF_INET6, (void *)&conf->dst_ip6[0], temp2, sizeof(temp2)), port_str);
+		printf("%s:%s -> %s:%s\n",
+			inet_ntop(AF_INET6, (void *)&conf->src_ip6[1], temp1, sizeof(temp1)), port_str,
+			inet_ntop(AF_INET6, (void *)&conf->dst_ip6[1], temp2, sizeof(temp2)), port_str);
 		} else {
-		printf("%s:%u -> %s:%u\n",
-			inet_ntop(AF_INET, (void *)&conf->src_ip4[0], temp1, sizeof(temp1)), conf->src_port & 0xffff,
-			inet_ntop(AF_INET, (void *)&conf->dst_ip4[0], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
-		printf("%s:%u -> %s:%u\n",
-			inet_ntop(AF_INET, (void *)&conf->src_ip4[1], temp1, sizeof(temp1)), conf->src_port & 0xffff,
-			inet_ntop(AF_INET, (void *)&conf->dst_ip4[1], temp2, sizeof(temp2)), conf->dst_port & 0xffff);
+		printf("%s:%s -> %s:%s\n",
+			inet_ntop(AF_INET, (void *)&conf->src_ip4[0], temp1, sizeof(temp1)), port_str,
+			inet_ntop(AF_INET, (void *)&conf->dst_ip4[0], temp2, sizeof(temp2)), port_str);
+		printf("%s:%s -> %s:%s\n",
+			inet_ntop(AF_INET, (void *)&conf->src_ip4[1], temp1, sizeof(temp1)), port_str,
+			inet_ntop(AF_INET, (void *)&conf->dst_ip4[1], temp2, sizeof(temp2)), port_str);
 	}
 
 	printf("======================\n");
@@ -304,7 +312,7 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->src_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->counters.num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->udp_port & 0xffff)) == 0) {
 			ptd->src_port++;
 			ptd->src_port = (ptd->src_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -318,7 +326,7 @@ craft_packet_ipv4(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->dst_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->counters.num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->udp_port & 0xffff)) == 0) {
 			ptd->dst_port++;
 			ptd->dst_port = (ptd->dst_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -369,7 +377,7 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->src_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->counters.num_tx_pkts % (conf->src_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->udp_port & 0xffff)) == 0) {
 			ptd->src_port++;
 			ptd->src_port = (ptd->src_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -383,7 +391,7 @@ craft_packet_ipv6(per_thread_data_t * ptd, struct rte_mbuf *pkt)
 		udp->dst_port = rand() & 0xffff; // FIXME rand (is up to 32768)!
 		break;
 	case PORT_INCREMENT:
-		if ((ptd->counters.num_tx_pkts % (conf->dst_port & 0xffff)) == 0) {
+		if ((ptd->counters.num_tx_pkts % (conf->udp_port & 0xffff)) == 0) {
 			ptd->dst_port++;
 			ptd->dst_port = (ptd->dst_port & 0xffff) + PORT_INCREMENT;
 		}
@@ -585,10 +593,13 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
 				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip4));
 
-				/* Is it our packet ? check addr && dst ports */
-				if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4) ||
-					(rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port)) {
-					continue;
+				if(unlikely((conf->udp_port & PORT_RANDOM) == 0))
+				{
+					/* Is it our packet ? check addr && dst ports */
+					if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4) ||
+						(rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port)) {
+						continue;
+					}
 				}
 
 				/* Set payload to UDP payload */
@@ -703,8 +714,8 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd, thread_type_t
 				memcpy(ptd[i].src_ip6, &conf->src_ip6[p*16], 16);
 				memcpy(ptd[i].dst_ip6, &conf->dst_ip6[p*16], 16);
 
-				ptd[i].src_port = conf->src_port+q;
-				ptd[i].dst_port = conf->dst_port;
+				ptd[i].src_port = conf->udp_port+q;
+				ptd[i].dst_port = conf->udp_port;
 				ptd[i].pkt_len = conf->packet_size;
 
 				/* and launch it */
@@ -719,7 +730,7 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd, thread_type_t
 				ptd[i].type = THREAD_RX;
 				ptd[i].src_ip4 = conf->src_ip4[(p==1)?0:1];
 				ptd[i].dst_ip4 = conf->dst_ip4[(p==1)?0:1];
-				ptd[i].dst_port = conf->dst_port;
+				ptd[i].dst_port = conf->udp_port;
 
 				ptd[i].counters.latency_min = 0xffffffffffffffff;
 				ptd[i].counters.latency_max = 0;

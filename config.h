@@ -59,8 +59,7 @@ typedef struct {
 	uint32_t dst_ip4[2];
 	uint8_t  src_ip6[32];
 	uint8_t  dst_ip6[32];
-	uint32_t src_port; /* bits 0-15=port, bit16=increment, bit17=random */
-	uint32_t dst_port;
+	uint32_t udp_port; /* bits 0-15=port, bit16=increment, bit17=random */
 
 } config_t;
 
