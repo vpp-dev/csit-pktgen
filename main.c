@@ -599,7 +599,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
 			} else {
 				/* this was not IP packet, free memory && continue*/
-				printf("UNKNOWN PACKET !\n"); fflush(stdout);
+// 				printf("UNKNOWN PACKET !\n"); fflush(stdout);
 // 				hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 				rte_pktmbuf_free(pkts[i]);
 				continue;
@@ -748,51 +748,51 @@ static per_thread_data_t * launch_threads(per_thread_data_t * ptd, thread_type_t
 }
 
 typedef enum {RATE_START, RATE_UP, RATE_DOWN} updown;
-static uint64_t binsrch_get_next_pps(updown direction)
+static void binsrch_get_pps(updown direction)
 {
 	switch(direction)
 	{
 		case RATE_START:
-			conf->step_min = 0;
-			conf->step_max = (conf->max_rate - conf->min_rate) / conf->step;
-			conf->cur_rate = (conf->step_max / 2) * conf->step;
+			conf->cur_rate = (conf->max_rate - conf->min_rate) / 2;
+			conf->binsrch_step = conf->cur_rate;
 			break;
 
 		case RATE_UP:
-			conf->step_min = conf->cur_rate / conf->step;
-			conf->cur_rate += ((conf->step_max - conf->step_min) / 2) * conf->step;
+			conf->min_rate = conf->cur_rate + 1;
+			conf->binsrch_step = (conf->max_rate - conf->min_rate) / 2;
+			conf->cur_rate += conf->binsrch_step;
 			break;
 
 		case RATE_DOWN:
-			conf->step_max = conf->cur_rate / conf->step;
-			conf->cur_rate -= ((conf->step_max - conf->step_min) / 2) * conf->step;
+			conf->max_rate = conf->cur_rate - 1;
+			conf->binsrch_step = (conf->max_rate - conf->min_rate) / 2;
+			conf->cur_rate -= conf->binsrch_step;
 			break;
 	}
 
-	return rate_to_pps(conf->cur_rate + conf->min_rate);
+	conf->pps = rate_to_pps(conf->cur_rate);
+	return;
 }
 
-static uint64_t linsrch_get_next_pps(updown direction)
+static void linsrch_get_pps(updown direction)
 {
-	uint64_t rate;
-
 	switch(direction)
 	{
 		case RATE_START:
-			rate = conf->max_rate;
+			conf->cur_rate = conf->max_rate;
 			break;
 
 		case RATE_DOWN:
-			rate = conf->cur_rate - conf->step;
+			conf->cur_rate -= conf->step;
 			break;
 
 		case RATE_UP: /* unused here */
-			rate = 0;
+			conf->cur_rate = 0;
 			break;
 	}
 
-	conf->cur_rate = rate;
-	return rate_to_pps(rate);
+	conf->pps = rate_to_pps(conf->cur_rate);
+	return;
 }
 
 /* Sum stats from per thread data */
@@ -986,14 +986,14 @@ int main(int argc, char **argv)
 	/* init binary or linear search */
 	switch(conf->test) {
 		case BINSEARCH:
-			conf->pps = binsrch_get_next_pps(RATE_START);
-			printf("Binary search: current rate: %lu bps (%lu pps)\n",
-				   pps_to_rate(conf->pps), conf->pps);
+			binsrch_get_pps(RATE_START);
+			printf("Binary search: current rate: %lu bps (%lu pps) step: %lu\n",
+				   pps_to_rate(conf->pps), conf->pps, conf->step);
 			old_pps = conf->pps;
 			break;
 
 		case LINSEARCH:
-			conf->pps = linsrch_get_next_pps(RATE_START);
+			linsrch_get_pps(RATE_START);
 			break;
 	}
 
@@ -1031,21 +1031,29 @@ int main(int argc, char **argv)
 				{
 					/* packetloss is bellow drop %, increase rate */
 					last_valid_pps = conf->pps;
-					conf->pps = binsrch_get_next_pps(RATE_UP);
-					printf("Increasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					binsrch_get_pps(RATE_UP);
+					if (conf->binsrch_step > conf->step)
+						printf("Increasing rate to %lu bps (%lu pps) step: %lu\n",
+						   pps_to_rate(conf->pps), conf->pps, conf->binsrch_step);
 				}
 
 				if (lostpercent > conf->drop_ratio)
 				{
 					/* packetloss is above drop %, decrease rate */
-					conf->pps = binsrch_get_next_pps(RATE_DOWN);
-					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					binsrch_get_pps(RATE_DOWN);
+					if (conf->binsrch_step > conf->step)
+						printf("Decreasing rate to %lu bps (%lu pps) step: %lu\n",
+						   pps_to_rate(conf->pps), conf->pps, conf->binsrch_step);
 				}
 
-				if (old_pps == conf->pps)
+				if (conf->binsrch_step <= conf->step)
 				{
+					printf("Current step (%lu) is bellow defined step (%lu), exitting...\n",
+						   conf->step, conf->binsrch_step);
+
 					if (lostpercent > (uint64_t)conf->drop_ratio)
 						conf->pps = last_valid_pps;
+
 					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 					exit(0);
 				}
@@ -1078,7 +1086,7 @@ int main(int argc, char **argv)
 				if (lostpercent > conf->drop_ratio)
 				{
 					/* packetloss is above drop , decrease rate */
-					conf->pps = linsrch_get_next_pps(RATE_DOWN);
+					linsrch_get_pps(RATE_DOWN);
 					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 				} else
 				{

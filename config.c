@@ -23,6 +23,7 @@ static config_t config = {
 	.duration = 0,
 	.pps = 0,
 	.pts = 0,
+	.step = 1,
 
 	.num_ports = 2,
 	.num_tx_queues = 1,

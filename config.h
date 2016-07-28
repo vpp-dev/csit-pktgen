@@ -41,11 +41,10 @@ typedef struct {
 	unsigned int burst_size;
 
 	uint64_t step;
+	uint64_t binsrch_step;
 	uint64_t min_rate;
 	uint64_t cur_rate;
 	uint64_t max_rate;
-	uint64_t step_min;
-	uint64_t step_max;
 	float drop_ratio;
 
 	int packet_size;
