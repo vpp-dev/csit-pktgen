@@ -156,14 +156,6 @@ static inline void dump_dpdk_error(uint64_t flags)
 		printf("IP cksum of RX pkt. is not OK.\n");
 	if (flags & PKT_RX_EIP_CKSUM_BAD)
 		printf("External IP header checksum error.\n");
-	if (flags & PKT_RX_OVERSIZE)
-		printf("Num of desc of an RX pkt oversize.\n");
-	if (flags & PKT_RX_HBUF_OVERFLOW)
-		printf("Header buffer overflow.\n");
-	if (flags & PKT_RX_RECIP_ERR)
-		printf("Hardware processing error.\n");
-	if (flags & PKT_RX_MAC_ERR)
-		printf("MAC error.\n");
 	if (flags & PKT_RX_IEEE1588_PTP)
 		printf("RX IEEE1588 L2 Ethernet PT Packet.\n");
 	if (flags & PKT_RX_IEEE1588_TMST)
