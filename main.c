@@ -32,6 +32,10 @@
 #include "config.h"
 
 #define MEMPOOL_CACHE_SIZE   256
+/* packet magic number to identify our packets */
+#define PKT_MAGIC_ID 0xAA55DEADCAFE55AA
+/* time to flush network buffers in seconds */
+#define FLUSH_BUFFER_TIME 2
 
 config_t *conf = NULL;
 
@@ -140,6 +144,7 @@ typedef struct {
 } per_thread_data_t;
 
 typedef struct {
+	uint64_t magic_id;
 	uint64_t tsc; // time stamp counter
 } packet_payload;
 
@@ -512,6 +517,7 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 			else
 				payload = craft_packet_ipv6(ptd, pkts[i]);
 
+			payload->magic_id = PKT_MAGIC_ID;
 			payload->tsc = rte_rdtsc(); /* put tsc into payload and recalculate checksum */
 			calculate_checksum(pkts[i]);
 		}
@@ -597,6 +603,12 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				/* Set payload to UDP payload */
 				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
+				if (payload->magic_id != PKT_MAGIC_ID)
+				{
+					printf("Bad magic number !\n"); fflush(stdout);
+					rte_pktmbuf_free(pkts[i]);
+					continue;
+				}
 			} else {
 				/* this was not IP packet, free memory && continue*/
 // 				printf("UNKNOWN PACKET !\n"); fflush(stdout);
@@ -864,10 +876,10 @@ static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
 /* Dump final stats to stdout */
 static void dump_final_stats(counters *ctr, uint64_t time_diff)
 {
-	printf("%lu packets transmitted, %lu received, lost %lu (%i%% packet loss), time %lu ms\n",
+	printf("%lu packets transmitted, %lu received, lost %lu (%f%% packet loss), time %lu ms\n",
 		ctr->num_tx_pkts, ctr->num_rx_pkts,
 		ctr->num_tx_pkts - ctr->num_rx_pkts,
-		(int)((ctr->num_tx_pkts - ctr->num_rx_pkts) * 100 / ctr->num_tx_pkts),
+		(float)((ctr->num_tx_pkts - ctr->num_rx_pkts) * 100 / (float)ctr->num_tx_pkts),
 		time_diff);
 
 	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns, pps: %lu\n",
@@ -987,7 +999,7 @@ int main(int argc, char **argv)
 	switch(conf->test) {
 		case BINSEARCH:
 			binsrch_get_pps(RATE_START);
-			printf("Binary search: current rate: %lu bps (%lu pps) step: %lu\n",
+			printf("BINARY search: current rate: %lu bps (%lu pps) step: %lu\n",
 				   pps_to_rate(conf->pps), conf->pps, conf->step);
 			old_pps = conf->pps;
 			break;
@@ -1012,7 +1024,7 @@ int main(int argc, char **argv)
 			if (conf->test == BINSEARCH) {
 				tx_should_stop = 1; // stop TX
 				clock_gettime(CLOCK_MONOTONIC, &actual);
-				sleep(1); // time to flush network card buffers
+				sleep(FLUSH_BUFFER_TIME); // time to flush network card buffers
 				rx_should_stop = 1;
 				rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
 				should_quit = 0;
@@ -1024,7 +1036,7 @@ int main(int argc, char **argv)
 
 				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
 				lostpercent = ((float)lost*100) / (float)runtime_cnt.num_tx_pkts;
-				printf("Current rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
+				printf("BINARY search: finished test with rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
 
 				if (lostpercent < conf->drop_ratio)
@@ -1033,7 +1045,7 @@ int main(int argc, char **argv)
 					last_valid_pps = conf->pps;
 					binsrch_get_pps(RATE_UP);
 					if (conf->binsrch_step > conf->step)
-						printf("Increasing rate to %lu bps (%lu pps) step: %lu\n",
+						printf("BINARY search: increasing rate to %lu bps (%lu pps) step: %lu\n",
 						   pps_to_rate(conf->pps), conf->pps, conf->binsrch_step);
 				}
 
@@ -1042,19 +1054,23 @@ int main(int argc, char **argv)
 					/* packetloss is above drop %, decrease rate */
 					binsrch_get_pps(RATE_DOWN);
 					if (conf->binsrch_step > conf->step)
-						printf("Decreasing rate to %lu bps (%lu pps) step: %lu\n",
+						printf("BINARY search: decreasing rate to %lu bps (%lu pps) step: %lu\n",
 						   pps_to_rate(conf->pps), conf->pps, conf->binsrch_step);
 				}
 
 				if (conf->binsrch_step <= conf->step)
 				{
-					printf("Current step (%lu) is bellow defined step (%lu), exitting...\n",
-						   conf->step, conf->binsrch_step);
+					printf("BINARY search: current step (%lu) is bellow defined step (%lu), exitting...\n",
+						   conf->binsrch_step, conf->step);
 
 					if (lostpercent > (uint64_t)conf->drop_ratio)
 						conf->pps = last_valid_pps;
 
-					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					if (conf->pps)
+						printf("BINARY search: found rate %lu bps (%lu pps)\n",
+							   pps_to_rate(conf->pps), conf->pps);
+					else
+						printf("BINARY search: Rate not found !\n");
 					exit(0);
 				}
 
@@ -1069,7 +1085,7 @@ int main(int argc, char **argv)
 				/* linear search is starting at maxrate and decreases speed by step */
 				tx_should_stop = 1; // stop TX
 				clock_gettime(CLOCK_MONOTONIC, &actual);
-				sleep(1); // time to flush network card buffers
+				sleep(FLUSH_BUFFER_TIME); // time to flush network card buffers
 				rx_should_stop = 1;
 				rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
 				should_quit = 0;
@@ -1081,21 +1097,21 @@ int main(int argc, char **argv)
 
 				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
 				lostpercent = ((float)lost*100) / (float)runtime_cnt.num_tx_pkts;
-				printf("Current rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
+				printf("LINEAR search: finished test with rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
 				if (lostpercent > conf->drop_ratio)
 				{
 					/* packetloss is above drop , decrease rate */
 					linsrch_get_pps(RATE_DOWN);
-					printf("Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					printf("LINEAR search: Decreasing rate to %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 				} else
 				{
-					printf("Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
+					printf("LINEAR search: Found rate %lu bps (%lu pps)\n", pps_to_rate(conf->pps), conf->pps);
 					exit(0);
 				}
 
 				if (conf->cur_rate <= conf->min_rate) {
-					printf("Rate not found !\n");
+					printf("LINEAR search: Rate not found !\n");
 					exit(0);
 				}
 
@@ -1123,7 +1139,7 @@ int main(int argc, char **argv)
 	printf("Stopping Tx threads and waiting for Rx threads to finish\n");
 	tx_should_stop = 1;
 	clock_gettime(CLOCK_MONOTONIC, &actual);
-	sleep(1);
+	sleep(FLUSH_BUFFER_TIME);
 	rx_should_stop = 1;
 	rte_eal_mp_wait_lcore();
 
