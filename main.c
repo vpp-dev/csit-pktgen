@@ -150,6 +150,20 @@ typedef struct {
 
 counters runtime_cnt = {0};
 
+static inline uint64_t rte_rdtsc_custom(void)
+{
+	uint64_t tsc_64;
+
+	asm volatile("   \n\t\
+	rdtsc            \n\t\
+	shlq $32, %%rdx  \n\t\
+	orq %%rdx, %%rax \n\t\
+	" :
+	"=a" (tsc_64));
+	return tsc_64;
+}
+
+
 /* Shows DPDK error on stdout. Called from RX func. */
 static inline void dump_dpdk_error(uint64_t flags)
 {
@@ -161,16 +175,7 @@ static inline void dump_dpdk_error(uint64_t flags)
 		printf("IP cksum of RX pkt. is not OK.\n");
 	if (flags & PKT_RX_EIP_CKSUM_BAD)
 		printf("External IP header checksum error.\n");
-	if (flags & PKT_RX_IEEE1588_PTP)
-		printf("RX IEEE1588 L2 Ethernet PT Packet.\n");
-	if (flags & PKT_RX_IEEE1588_TMST)
-		printf("RX IEEE1588 L2/L4 timestamped packet.\n");
-	if (flags & PKT_RX_FDIR_ID)
-		printf("FD id reported if FDIR match.\n");
-	if (flags & PKT_RX_FDIR_FLX)
-		printf("Flexible bytes reported if FDIR match.\n");
-	if (flags & PKT_RX_QINQ_PKT)
-		printf(") RX packet with double VLAN stripped.\n");
+
 	printf("\n");
 }
 
@@ -493,7 +498,7 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 
 	while(!tx_should_stop) {
 		worker_barrier_check(b);
-		tsc = rte_rdtsc();
+		tsc = rte_rdtsc_custom();
 
 		/* Is number of "packets to send" set ? */
 		if(unlikely(ptd->pts)) {
@@ -503,8 +508,7 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 
 		/* Is "delay between packets" set ? */
 		if(unlikely(ptd->delay)) {
-			pkts_in_round = 1;
-			if (tsc < (last_run_tsc + ptd->delay))
+			if (tsc < (last_run_tsc + ptd->delay * pkts_in_round))
 				continue;
 		}
 		last_run_tsc = tsc;
@@ -518,7 +522,7 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 				payload = craft_packet_ipv6(ptd, pkts[i]);
 
 			payload->magic_id = PKT_MAGIC_ID;
-			payload->tsc = rte_rdtsc(); /* put tsc into payload and recalculate checksum */
+			payload->tsc = tsc; /* put tsc into payload and recalculate checksum */
 			calculate_checksum(pkts[i]);
 		}
 
@@ -570,7 +574,8 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 
 		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, conf->burst_size);
-		uint64_t tsc2 = rte_rdtsc();
+		uint64_t tsc2 = rte_rdtsc_custom();
+
 		if (!nb_rx)
 			continue;
 
@@ -603,8 +608,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				/* Set payload to UDP payload */
 				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
-				if (payload->magic_id != PKT_MAGIC_ID)
-				{
+				if (payload->magic_id != PKT_MAGIC_ID) {
 					printf("Bad magic number !\n"); fflush(stdout);
 					rte_pktmbuf_free(pkts[i]);
 					continue;
@@ -620,7 +624,11 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			//printf("port %u queue %u tx_timestamp %lu rx_timestamp %lu delte %lu (%lu ns)\n",
 			//       ptd->port, ptd->queue, *tsc1, tsc2, tsc2-*tsc1, TICKS_TO_NSEC(tsc2-*tsc1));
 			//hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
-			latency = tsc2-payload->tsc;
+			latency = tsc2 - payload->tsc;
+			if (payload->tsc > tsc2) {
+				printf("Received invalid TSC! TSC@send: 0x%lx, TSC@recv: 0x%lx\n", payload->tsc, tsc2);
+				latency = 0;
+			}
 
 			/* set min/max and sum latency */
 			ptd->counters.latency_sum += latency;
@@ -630,7 +638,8 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				ptd->counters.latency_max = latency;
 
 			/* Was there any DPDK error ? */
-			if (unlikely(pkts[i]->ol_flags & 0xFFFFFFFFFFFFFFF8)) /* mask lowest 3 bits */
+			if (unlikely(pkts[i]->ol_flags &
+				(PKT_RX_L4_CKSUM_BAD | PKT_RX_IP_CKSUM_BAD | PKT_RX_EIP_CKSUM_BAD)))
 				dump_dpdk_error(pkts[i]->ol_flags);
 
 			/* Inc counters && free memory */
@@ -831,6 +840,13 @@ static void calculate_runtime_counters(counters *runtime_cnt, per_thread_data_t 
 
 		/* set min interval to maximum */
 		ptd[q].counters.latency_min = 0xffffffffffffffff;
+
+	}
+
+	if (runtime_cnt->num_tx_pkts < runtime_cnt->num_rx_pkts) {
+		printf("Warning: received(%lu) more packets than sent(%lu)\n",
+			   runtime_cnt->num_rx_pkts, runtime_cnt->num_tx_pkts);
+		runtime_cnt->num_rx_pkts = runtime_cnt->num_tx_pkts;
 	}
 }
 
@@ -882,12 +898,16 @@ static void dump_final_stats(counters *ctr, uint64_t time_diff)
 		(float)((ctr->num_tx_pkts - ctr->num_rx_pkts) * 100 / (float)ctr->num_tx_pkts),
 		time_diff);
 
-	printf("Average throughput %lu kbit/s, latency min/avg/max %lu/%lu/%lu ns, pps: %lu\n",
-		((ctr->num_tx_octets) * 8 / time_diff),
-		TICKS_TO_NSEC(ctr->latency_min),
-		TICKS_TO_NSEC(ctr->latency_sum / ctr->num_tx_pkts),
-		TICKS_TO_NSEC(ctr->latency_max),
-		ctr->num_rx_pkts / (time_diff/1000));
+	printf("Average TX throughput %lu kbit/s, TX pps: %lu\n",
+		   ((ctr->num_tx_octets) * 8 / time_diff),
+		   ctr->num_tx_pkts / (time_diff/1000));
+
+	printf("Average RX throughput %lu kbit/s, RX pps: %lu, latency min/avg/max %lu/%lu/%lu ns\n",
+		   ((ctr->num_rx_octets) * 8 / time_diff),
+		   ctr->num_rx_pkts / (time_diff/1000),
+		   TICKS_TO_NSEC(ctr->latency_min),
+		   TICKS_TO_NSEC(ctr->latency_sum / ctr->num_tx_pkts),
+		   TICKS_TO_NSEC(ctr->latency_max));
 }
 
 int main(int argc, char **argv)
@@ -900,7 +920,7 @@ int main(int argc, char **argv)
 	int i;
 	per_thread_data_t * ptd = NULL, * interval_copy;
 	int num_threads;
-	uint64_t lost, old_pps=0, last_valid_pps=0;
+	uint64_t lost, last_valid_pps=0;
 	float lostpercent=0;
 
 	/* check if "--" is present on command line. ("--" is separator for DPDK and pktgen
@@ -999,13 +1019,14 @@ int main(int argc, char **argv)
 	switch(conf->test) {
 		case BINSEARCH:
 			binsrch_get_pps(RATE_START);
-			printf("BINARY search: current rate: %lu bps (%lu pps) step: %lu\n",
-				   pps_to_rate(conf->pps), conf->pps, conf->step);
-			old_pps = conf->pps;
+			printf("BINARY search: starting with: %lu bps (%lu pps) step: %lu\n",
+				   pps_to_rate(conf->pps), conf->pps, conf->binsrch_step);
 			break;
 
 		case LINSEARCH:
 			linsrch_get_pps(RATE_START);
+			printf("LINEAR search: starting with: %lu bps (%lu pps)\n",
+				   pps_to_rate(conf->pps), conf->pps);
 			break;
 	}
 
@@ -1032,12 +1053,16 @@ int main(int argc, char **argv)
 				clear_barrier(b);
 				calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
 				printf("\n");
-				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
+				uint64_t time_diff = clock_diff(started, actual);
 
 				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
 				lostpercent = ((float)lost*100) / (float)runtime_cnt.num_tx_pkts;
 				printf("BINARY search: finished test with rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
+				printf("BINARY search: sent (%lu packets [%lu pps]), received (%lu packets [%lu pps]) time: (%lu ms)\n",
+						runtime_cnt.num_tx_pkts, runtime_cnt.num_tx_pkts * 1000 / time_diff,
+						runtime_cnt.num_rx_pkts, runtime_cnt.num_rx_pkts * 1000 / time_diff,
+						time_diff);
 
 				if (lostpercent < conf->drop_ratio)
 				{
@@ -1076,7 +1101,6 @@ int main(int argc, char **argv)
 
 				memset(&runtime_cnt, 0, sizeof(counters));
 				runtime_cnt.latency_min = 0xffffffffffffffff;
-				old_pps = conf->pps;
 				ptd = launch_threads(ptd, THREAD_RX|THREAD_TX); // relaunch again
 				continue;
 			}
@@ -1093,12 +1117,17 @@ int main(int argc, char **argv)
 				clear_barrier(b);
 				calculate_runtime_counters(&runtime_cnt, ptd, num_threads);
 				printf("\n");
-				dump_final_stats(&runtime_cnt, clock_diff(started, actual));
+				uint64_t time_diff = clock_diff(started, actual);
 
 				lost = runtime_cnt.num_tx_pkts - runtime_cnt.num_rx_pkts;
 				lostpercent = ((float)lost*100) / (float)runtime_cnt.num_tx_pkts;
 				printf("LINEAR search: finished test with rate: %lu bps (%lu pps), lost %lu (%f %%)\n",
 					   pps_to_rate(conf->pps), conf->pps, lost, lostpercent);
+				printf("LINEAR search: sent (%lu packets [%lu pps]), received (%lu packets [%lu pps]) time: (%lu ms)\n",
+						runtime_cnt.num_tx_pkts, runtime_cnt.num_tx_pkts * 1000 / time_diff,
+						runtime_cnt.num_rx_pkts, runtime_cnt.num_rx_pkts * 1000 / time_diff,
+						time_diff);
+
 				if (lostpercent > conf->drop_ratio)
 				{
 					/* packetloss is above drop , decrease rate */
@@ -1117,7 +1146,6 @@ int main(int argc, char **argv)
 
 				memset(&runtime_cnt, 0, sizeof(counters));
 				runtime_cnt.latency_min = 0xffffffffffffffff; /* set maximum latency */
-				old_pps = conf->pps;
 				ptd = launch_threads(ptd, THREAD_RX|THREAD_TX); // relaunch again
 				continue;
 			}
