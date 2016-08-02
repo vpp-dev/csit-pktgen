@@ -150,20 +150,6 @@ typedef struct {
 
 counters runtime_cnt = {0};
 
-static inline uint64_t rte_rdtsc_custom(void)
-{
-	uint64_t tsc_64;
-
-	asm volatile("   \n\t\
-	rdtsc            \n\t\
-	shlq $32, %%rdx  \n\t\
-	orq %%rdx, %%rax \n\t\
-	" :
-	"=a" (tsc_64));
-	return tsc_64;
-}
-
-
 /* Shows DPDK error on stdout. Called from RX func. */
 static inline void dump_dpdk_error(uint64_t flags)
 {
@@ -457,22 +443,32 @@ static inline void prepare_arp(config_t *conf, struct rte_mbuf *pkt, uint16_t ar
 static inline void send_arp(config_t *conf)
 {
 	struct rte_mbuf *pkt;
+	uint16_t ret = 0;
 
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 0);
-	rte_eth_tx_burst(0, 0, &pkt, 1);  /* request from port 0 */
+	ret += rte_eth_tx_burst(0, 0, &pkt, 1);  /* request from port 0 */
+	rte_pktmbuf_free(pkt);
 
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 1);
-	rte_eth_tx_burst(1, 0, &pkt, 1);  /* request from port 1 */
+	ret += rte_eth_tx_burst(1, 0, &pkt, 1);  /* request from port 1 */
+	rte_pktmbuf_free(pkt);
 
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REPLY, 0);
-	rte_eth_tx_burst(0, 0, &pkt, 1);  /* response from port 0 */
+	ret += rte_eth_tx_burst(0, 0, &pkt, 1);  /* response from port 0 */
+	rte_pktmbuf_free(pkt);
 
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REPLY, 1);
-	rte_eth_tx_burst(1, 0, &pkt, 1);  /* response from port 1 */
+	ret += rte_eth_tx_burst(1, 0, &pkt, 1);  /* response from port 1 */
+	rte_pktmbuf_free(pkt);
+
+	if (ret != 4) {
+		printf("Unable to send ARP packet ! !\n");
+		abort();
+	}
 }
 
 /* Main transmit function */
@@ -498,7 +494,7 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 
 	while(!tx_should_stop) {
 		worker_barrier_check(b);
-		tsc = rte_rdtsc_custom();
+		tsc = rte_rdtsc();
 
 		/* Is number of "packets to send" set ? */
 		if(unlikely(ptd->pts)) {
@@ -515,6 +511,11 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 
 		for (i=0; i<pkts_in_round; i++) {
 			pkts[i] = rte_pktmbuf_alloc(pktmbuf_pool); /* allocate packet memory */
+			if (pkts[i] == NULL)
+			{
+				printf("Cannot allocate mbuf !\n");
+				abort();
+			}
 
 			if (!conf->ipv6) /* fill headers */
 				payload = craft_packet_ipv4(ptd, pkts[i]);
@@ -574,7 +575,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		worker_barrier_check(b);
 
 		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, conf->burst_size);
-		uint64_t tsc2 = rte_rdtsc_custom();
+		uint64_t tsc2 = rte_rdtsc();
 
 		if (!nb_rx)
 			continue;
@@ -588,11 +589,19 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				continue;
 			/* handle IPv6 */
 			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
+				if (!conf->ipv6) { /* We are using IPv4, drop packet */
+					rte_pktmbuf_free(pkts[i]);
+					continue;
+				}
 				ip6 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv6_hdr *, sizeof(struct ether_hdr));
-
 				payload = rte_pktmbuf_mtod_offset(pkts[i], packet_payload *, sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
+
 				/* handle IPv4 */
 			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv4) {
+				if (conf->ipv6) { /* We are using IPv6, drop packet */
+					rte_pktmbuf_free(pkts[i]);
+					continue;
+				}
 				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
 				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip4));
 
@@ -610,6 +619,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
 				if (payload->magic_id != PKT_MAGIC_ID) {
 					printf("Bad magic number !\n"); fflush(stdout);
+					hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 					rte_pktmbuf_free(pkts[i]);
 					continue;
 				}
@@ -627,6 +637,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			latency = tsc2 - payload->tsc;
 			if (payload->tsc > tsc2) {
 				printf("Received invalid TSC! TSC@send: 0x%lx, TSC@recv: 0x%lx\n", payload->tsc, tsc2);
+				hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 				latency = 0;
 			}
 
@@ -1006,11 +1017,11 @@ int main(int argc, char **argv)
 	/* send ARP first */
 	launch_threads(ptd, THREAD_RX);
 
-	send_arp(conf);
 	if (conf->arp_delay) {
 		printf("Waiting %i seconds after ARP...\n", conf->arp_delay);
 		sleep(conf->arp_delay);
 	}
+	send_arp(conf);
 	rx_should_stop = 1; // stop RX threads
 	rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
 	rx_should_stop = 0;
