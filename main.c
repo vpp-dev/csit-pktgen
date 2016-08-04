@@ -610,7 +610,12 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
 				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip4));
 
-				if(unlikely((conf->udp_port & PORT_RANDOM) == 0))
+				if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4)) {
+					ptd->counters.num_rx_dropped++;
+					continue;
+				}
+
+				if(unlikely((conf->udp_port & (PORT_RANDOM|PORT_INCREMENT)) == 0))
 				{
 					/* Is it our packet ? check addr && dst ports */
 					if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4) ||
