@@ -112,6 +112,7 @@ typedef struct {
 
 	uint64_t num_rx_pkts;
 	uint64_t num_rx_octets;
+	uint64_t num_rx_dropped;
 
 	uint64_t latency_sum;
 	uint64_t latency_min; /* total latency */
@@ -586,11 +587,14 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			/* handle ARP */
 			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_ARP) {
  				printf("Received arp packet !\n"); fflush(stdout);
+				rte_pktmbuf_free(pkts[i]);
+				ptd->counters.num_rx_dropped++;
 				continue;
 			/* handle IPv6 */
 			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
 				if (!conf->ipv6) { /* We are using IPv4, drop packet */
 					rte_pktmbuf_free(pkts[i]);
+					ptd->counters.num_rx_dropped++;
 					continue;
 				}
 				ip6 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv6_hdr *, sizeof(struct ether_hdr));
@@ -600,6 +604,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv4) {
 				if (conf->ipv6) { /* We are using IPv6, drop packet */
 					rte_pktmbuf_free(pkts[i]);
+					ptd->counters.num_rx_dropped++;
 					continue;
 				}
 				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
@@ -610,6 +615,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 					/* Is it our packet ? check addr && dst ports */
 					if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4) ||
 						(rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port)) {
+						ptd->counters.num_rx_dropped++;
 						continue;
 					}
 				}
@@ -619,8 +625,8 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
 				if (payload->magic_id != PKT_MAGIC_ID) {
 					printf("Bad magic number !\n"); fflush(stdout);
-					hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 					rte_pktmbuf_free(pkts[i]);
+					ptd->counters.num_rx_dropped++;
 					continue;
 				}
 			} else {
@@ -628,6 +634,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 // 				printf("UNKNOWN PACKET !\n"); fflush(stdout);
 // 				hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 				rte_pktmbuf_free(pkts[i]);
+				ptd->counters.num_rx_dropped++;
 				continue;
 			}
 
@@ -837,6 +844,7 @@ static void calculate_runtime_counters(counters *runtime_cnt, per_thread_data_t 
 		runtime_cnt->num_tx_pkts   += ptd[q].counters.num_tx_pkts;
 		runtime_cnt->num_rx_octets += ptd[q].counters.num_rx_octets;
 		runtime_cnt->num_rx_pkts   += ptd[q].counters.num_rx_pkts;
+		runtime_cnt->num_rx_dropped+= ptd[q].counters.num_rx_dropped;
 
 		if (ptd[q].type == THREAD_RX) {
 			runtime_cnt->latency_sum   += ptd[q].counters.latency_sum;
@@ -880,11 +888,12 @@ static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
 
 		} else {
 			if (ptd[q].counters.num_rx_pkts) {
-				printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s]\n",
+				printf("Port %u queue %u rx pkts        : %15lu (%lu pps) [%lu kbit/s], %lu dropped\n",
 					   ptd[q].port, ptd[q].queue,
 		   ptd[q].counters.num_rx_pkts,
 		   ptd[q].counters.num_rx_pkts / conf->stats_interval,
-		   ptd[q].counters.num_rx_octets * 8 / (conf->stats_interval*1000));
+		   ptd[q].counters.num_rx_octets * 8 / (conf->stats_interval*1000),
+		   ptd[q].counters.num_rx_dropped);
 
 				printf("Port %u queue %u avg latency    : min/avg/max: (%lu ns)/(%lu ns)/(%lu ns)\n",
 					   ptd[q].port, ptd[q].queue,
@@ -903,10 +912,11 @@ static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
 /* Dump final stats to stdout */
 static void dump_final_stats(counters *ctr, uint64_t time_diff)
 {
-	printf("%lu packets transmitted, %lu received, lost %lu (%f%% packet loss), time %lu ms\n",
+	printf("%lu packets transmitted, %lu received, lost %lu (%f%% packet loss), dropped %lu, time %lu ms\n",
 		ctr->num_tx_pkts, ctr->num_rx_pkts,
 		ctr->num_tx_pkts - ctr->num_rx_pkts,
 		(float)((ctr->num_tx_pkts - ctr->num_rx_pkts) * 100 / (float)ctr->num_tx_pkts),
+		ctr->num_rx_dropped,
 		time_diff);
 
 	printf("Average TX throughput %lu kbit/s, TX pps: %lu\n",
@@ -1015,13 +1025,16 @@ int main(int argc, char **argv)
 	b = worker_barrier_init();
 
 	/* send ARP first */
-	launch_threads(ptd, THREAD_RX);
+	ptd = launch_threads(ptd, THREAD_RX);
 
 	if (conf->arp_delay) {
+		printf("Waiting %i seconds before ARP...\n", conf->arp_delay);
+		sleep(conf->arp_delay);
+		send_arp(conf);
 		printf("Waiting %i seconds after ARP...\n", conf->arp_delay);
 		sleep(conf->arp_delay);
 	}
-	send_arp(conf);
+
 	rx_should_stop = 1; // stop RX threads
 	rte_eal_mp_wait_lcore(); // check and mark all lcores as finished
 	rx_should_stop = 0;
