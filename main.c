@@ -590,36 +590,27 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				rte_pktmbuf_free(pkts[i]);
 				ptd->counters.num_rx_dropped++;
 				continue;
+
 			/* handle IPv6 */
 			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
-				if (!conf->ipv6) { /* We are using IPv4, drop packet */
+				if (!conf->ipv6) { /* We are using IPv4, drop IPv6 packet */
 					rte_pktmbuf_free(pkts[i]);
 					ptd->counters.num_rx_dropped++;
 					continue;
 				}
 				ip6 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv6_hdr *, sizeof(struct ether_hdr));
-				payload = rte_pktmbuf_mtod_offset(pkts[i], packet_payload *, sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
+				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip6));
+				payload = rte_pktmbuf_mtod_offset(pkts[i], packet_payload *,
+					sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
 
-				/* handle IPv4 */
-			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv4) {
-				if (conf->ipv6) { /* We are using IPv6, drop packet */
-					rte_pktmbuf_free(pkts[i]);
-					ptd->counters.num_rx_dropped++;
-					continue;
-				}
-				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
-				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip4));
-
-				if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4)) {
+				/* Is it our packet ? check addr && dst ports */
+				if ((!memcmp(ip6->src_addr, ptd->src_ip6, 16)) || (!memcmp(ip6->dst_addr, ptd->dst_ip6, 16))) {
 					ptd->counters.num_rx_dropped++;
 					continue;
 				}
 
-				if(unlikely((conf->udp_port & (PORT_RANDOM|PORT_INCREMENT)) == 0))
-				{
-					/* Is it our packet ? check addr && dst ports */
-					if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4) ||
-						(rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port)) {
+				if(unlikely((conf->udp_port & (PORT_RANDOM|PORT_INCREMENT)) == 0)) {
+						if (rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port) {
 						ptd->counters.num_rx_dropped++;
 						continue;
 					}
@@ -627,7 +618,40 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 
 				/* Set payload to UDP payload */
 				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
+					sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
+				if (payload->magic_id != PKT_MAGIC_ID) {
+					printf("Bad magic number !\n"); fflush(stdout);
+					rte_pktmbuf_free(pkts[i]);
+					ptd->counters.num_rx_dropped++;
+					continue;
+				}
+
+				/* handle IPv4 */
+			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv4) {
+				if (conf->ipv6) { /* We are using IPv6, drop IPv4 packet */
+					rte_pktmbuf_free(pkts[i]);
+					ptd->counters.num_rx_dropped++;
+					continue;
+				}
+				ip4 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv4_hdr *, sizeof(struct ether_hdr));
+				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip4));
+				payload = (packet_payload *)rte_pktmbuf_mtod_offset(pkts[i], uint64_t *,
 					sizeof(struct ether_hdr)+sizeof(*ip4)+sizeof(*udp));
+
+				/* Is it our packet ? check addr && dst ports */
+				if ((ip4->src_addr != ptd->src_ip4) || (ip4->dst_addr != ptd->dst_ip4)) {
+					ptd->counters.num_rx_dropped++;
+					continue;
+				}
+
+				if(unlikely((conf->udp_port & (PORT_RANDOM|PORT_INCREMENT)) == 0)) {
+					if (rte_be_to_cpu_16(udp->dst_port) != ptd->dst_port) {
+						ptd->counters.num_rx_dropped++;
+						continue;
+					}
+				}
+
+				/* Set payload to UDP payload */
 				if (payload->magic_id != PKT_MAGIC_ID) {
 					printf("Bad magic number !\n"); fflush(stdout);
 					rte_pktmbuf_free(pkts[i]);
