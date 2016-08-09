@@ -941,6 +941,11 @@ static void dump_ptd_stats(per_thread_data_t * ptd, int num_threads)
 /* Dump final stats to stdout */
 static void dump_final_stats(counters *ctr, uint64_t time_diff)
 {
+	if (!time_diff) {
+		printf("Time diff is less than 1 ms, no stats are calculated\n");
+		return;
+	}
+
 	printf("%lu packets transmitted, %lu received, lost %lu (%f%% packet loss), dropped %lu, time %lu ms\n",
 		ctr->num_tx_pkts, ctr->num_rx_pkts,
 		ctr->num_tx_pkts - ctr->num_rx_pkts,
@@ -950,11 +955,11 @@ static void dump_final_stats(counters *ctr, uint64_t time_diff)
 
 	printf("Average TX throughput %lu kbit/s, TX pps: %lu\n",
 		   ((ctr->num_tx_octets) * 8 / time_diff),
-		   ctr->num_tx_pkts / (time_diff/1000));
+		   (ctr->num_tx_pkts * 1000) / time_diff);
 
 	printf("Average RX throughput %lu kbit/s, RX pps: %lu, latency min/avg/max %lu/%lu/%lu ns\n",
 		   ((ctr->num_rx_octets) * 8 / time_diff),
-		   ctr->num_rx_pkts / (time_diff/1000),
+		   (ctr->num_rx_pkts * 1000) / time_diff,
 		   TICKS_TO_NSEC(ctr->latency_min),
 		   TICKS_TO_NSEC(ctr->latency_sum / ctr->num_tx_pkts),
 		   TICKS_TO_NSEC(ctr->latency_max));
