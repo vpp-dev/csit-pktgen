@@ -420,23 +420,23 @@ static inline void prepare_arp(config_t *conf, struct rte_mbuf *pkt, uint16_t ar
 
 	if (arp_opcode == ARP_OP_REQUEST) {
 		arp->arp_op = rte_cpu_to_be_16(ARP_OP_REQUEST);
-		memset(&eth->d_addr, 0xff, 6);
 		arp->arp_data.arp_sip = conf->src_ip4[port];
-		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &arp->arp_data.arp_sha);
 		arp->arp_data.arp_tip = conf->dst_ip4[port];
+		memset(&eth->d_addr, 0xff, 6);
 		memset(&arp->arp_data.arp_tha, 0, 6);
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &arp->arp_data.arp_sha);
 	}
 
 	if (arp_opcode == ARP_OP_REPLY) {
 		arp->arp_op = rte_cpu_to_be_16(ARP_OP_REPLY);
+		// (port==0)?1:0
 		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &eth->s_addr);
-		ether_addr_copy((const struct ether_addr *)&conf->dst_mac[port], &eth->d_addr);
-
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[(port==0)?1:0], &eth->d_addr);
 		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &arp->arp_data.arp_sha);
-		ether_addr_copy((const struct ether_addr *)&conf->dst_mac[port], &arp->arp_data.arp_tha);
-		port = (port==0)?1:0;  /* swap port */
-		arp->arp_data.arp_sip = conf->dst_ip4[port];
-		arp->arp_data.arp_tip = conf->src_ip4[port];
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[(port==0)?1:0], &arp->arp_data.arp_tha);
+
+		arp->arp_data.arp_sip = conf->dst_ip4[(port==0)?1:0];
+		arp->arp_data.arp_tip = conf->src_ip4[(port==0)?1:0];
 	}
 }
 
@@ -456,17 +456,7 @@ static inline void send_arp(config_t *conf)
 	ret += rte_eth_tx_burst(1, 0, &pkt, 1);  /* request from port 1 */
 	rte_pktmbuf_free(pkt);
 
-	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
-	prepare_arp(conf, pkt, ARP_OP_REPLY, 0);
-	ret += rte_eth_tx_burst(0, 0, &pkt, 1);  /* response from port 0 */
-	rte_pktmbuf_free(pkt);
-
-	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
-	prepare_arp(conf, pkt, ARP_OP_REPLY, 1);
-	ret += rte_eth_tx_burst(1, 0, &pkt, 1);  /* response from port 1 */
-	rte_pktmbuf_free(pkt);
-
-	if (ret != 4) {
+	if (ret != 2) {
 		printf("Unable to send ARP packet ! !\n");
 		abort();
 	}
@@ -568,6 +558,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	struct ipv4_hdr *ip4;
  	struct ipv6_hdr *ip6;
 	struct udp_hdr * udp;
+	struct arp_hdr * arp;
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -585,11 +576,31 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 			eth_type = rte_pktmbuf_mtod_offset(pkts[i], uint16_t *, 12);
 
 			/* handle ARP */
-			if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_ARP) {
- 				printf("Received arp packet !\n"); fflush(stdout);
-				rte_pktmbuf_free(pkts[i]);
-				ptd->counters.num_rx_dropped++;
-				continue;
+			if (unlikely(rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_ARP)) {
+				arp = rte_pktmbuf_mtod_offset(pkts[i], struct arp_hdr *, sizeof(struct ether_hdr));
+
+				if (arp->arp_op == rte_cpu_to_be_16(ARP_OP_REPLY)) {
+
+					if (arp->arp_data.arp_sip == conf->dst_ip4[0])
+						ether_addr_copy(&arp->arp_data.arp_sha, (const struct ether_addr *)&conf->dst_mac[0]);
+
+					if (arp->arp_data.arp_sip == conf->dst_ip4[1])
+						ether_addr_copy(&arp->arp_data.arp_sha, (const struct ether_addr *)&conf->dst_mac[1]);
+
+					rte_pktmbuf_free(pkts[i]);
+					ptd->counters.num_rx_dropped++;
+					continue;
+				} else if (arp->arp_op == rte_cpu_to_be_16(ARP_OP_REQUEST)) {
+
+					if (arp->arp_data.arp_tip == ptd->dst_ip4) {
+						prepare_arp(conf, pkts[i], ARP_OP_REPLY, ptd->port);
+						rte_eth_tx_burst(ptd->port, 0, &pkts[i], 1);
+					}
+
+					rte_pktmbuf_free(pkts[i]);
+					ptd->counters.num_rx_dropped++;
+					continue;
+				}
 
 			/* handle IPv6 */
 			} else if (rte_be_to_cpu_16(*eth_type) == ETHER_TYPE_IPv6) {
@@ -998,13 +1009,6 @@ int main(int argc, char **argv)
 	rte_eth_macaddr_get (0, (void *)&conf->src_mac[0]);
 	rte_eth_macaddr_get (1, (void *)&conf->src_mac[1]);
 
-	if (!conf->dst_macs_are_set) {
-		rte_eth_macaddr_get (0, (void *)&conf->dst_mac[1]);
-		rte_eth_macaddr_get (1, (void *)&conf->dst_mac[0]);
-	}
-
-	print_configuration();
-
 	signal(SIGINT, signal_stop);
 	signal(SIGALRM, signal_alarm);
 
@@ -1092,6 +1096,8 @@ int main(int argc, char **argv)
 	ptd = launch_threads(ptd, THREAD_RX|THREAD_TX);
 
 	runtime_cnt.latency_min = 0xffffffffffffffff;
+
+	print_configuration();
 
 	while (1) {
 		sleep(conf->stats_interval);
