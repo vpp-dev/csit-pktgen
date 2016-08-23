@@ -582,10 +582,10 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				if (arp->arp_op == rte_cpu_to_be_16(ARP_OP_REPLY)) {
 
 					if (arp->arp_data.arp_sip == conf->dst_ip4[0])
-						ether_addr_copy(&arp->arp_data.arp_sha, (const struct ether_addr *)&conf->dst_mac[0]);
+						ether_addr_copy(&arp->arp_data.arp_sha, (struct ether_addr *)&conf->dst_mac[0]);
 
 					if (arp->arp_data.arp_sip == conf->dst_ip4[1])
-						ether_addr_copy(&arp->arp_data.arp_sha, (const struct ether_addr *)&conf->dst_mac[1]);
+						ether_addr_copy(&arp->arp_data.arp_sha, (struct ether_addr *)&conf->dst_mac[1]);
 
 					rte_pktmbuf_free(pkts[i]);
 					ptd->counters.num_rx_dropped++;
