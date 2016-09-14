@@ -446,15 +446,15 @@ static inline void send_arp(config_t *conf)
 	struct rte_mbuf *pkt;
 	uint16_t ret = 0;
 
-	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+ 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 0);
 	ret += rte_eth_tx_burst(0, 0, &pkt, 1);  /* request from port 0 */
-	rte_pktmbuf_free(pkt);
+// 	rte_pktmbuf_free(pkt);
 
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 1);
 	ret += rte_eth_tx_burst(1, 0, &pkt, 1);  /* request from port 1 */
-	rte_pktmbuf_free(pkt);
+// 	rte_pktmbuf_free(pkt);
 
 	if (ret != 2) {
 		printf("Unable to send ARP packet ! !\n");
@@ -522,8 +522,11 @@ static int lcore_tx_main(__attribute__((unused)) void *arg)
 		ptd->counters.num_tx_pkts += pkts_sent;
 		ptd->counters.num_tx_octets += ptd->pkt_len * pkts_sent;
 
-		for (i=0; i<pkts_in_round; i++)
-			rte_pktmbuf_free(pkts[i]);
+		if (pkts_sent != pkts_in_round)
+		{
+			for (i=pkts_sent; i<pkts_in_round; i++)
+				rte_pktmbuf_free(pkts[i]);
+		}
 
 		/* Was all "packets to send" sent ? If yes, stop thread. */
 		if(unlikely(pts_present)) {
@@ -559,6 +562,13 @@ lcore_rx_main(__attribute__((unused)) void *arg)
  	struct ipv6_hdr *ip6;
 	struct udp_hdr * udp;
 	struct arp_hdr * arp;
+	FILE * fp;
+	char filename[64];
+
+	if (conf->save_latencies) {
+		sprintf(filename, "port_%u_queue_%u_core_%u.txt", ptd->port, ptd->queue, lcore_id);
+		fp = fopen (filename, "w+");
+	}
 
 	lcore_id = rte_lcore_id();
 	printf("Handling port %u RX queue %u on core %u\n", ptd->port, ptd->queue, lcore_id);
@@ -687,6 +697,8 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				hexdump(rte_pktmbuf_mtod_offset(pkts[i], void *, 0), pkts[i]->pkt_len);
 				latency = 0;
 			}
+			if (conf->save_latencies)
+				fprintf(fp, "%lu\n", TICKS_TO_NSEC(latency));
 
 			/* set min/max and sum latency */
 			ptd->counters.latency_sum += latency;
@@ -707,6 +719,8 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 		}
 	}
 	__sync_fetch_and_add(b->num_workers, -1);
+	if (conf->save_latencies)
+		fclose(fp);
 	return 0;
 }
 

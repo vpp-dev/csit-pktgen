@@ -24,6 +24,7 @@ static config_t config = {
 	.pps = 0,
 	.pts = 0,
 	.step = 1,
+	.save_latencies = 0,
 
 	.num_ports = 2,
 	.num_tx_queues = 1,
@@ -207,7 +208,7 @@ int parse_cmdline(int argc, char **argv)
 
 	enum {HELP, TEST, STATS_INTERVAL, DURATION, PPS, RATE, PTS, NUM_PORTS, NUM_TX_QUEUES,
 		NUM_RX_QUEUES, BURST_SIZE, PACKET_SIZE, IPV6, ARP_DELAY, SRC_IP_LIST, DST_IP_LIST,
-		UDP_PORT, DST_MAC_LIST, MIN_RATE, MAX_RATE, DROP_RATIO, STEP};
+		UDP_PORT, DST_MAC_LIST, MIN_RATE, MAX_RATE, DROP_RATIO, STEP, SAVE_LATENCIES};
 
 	while (1)
 	{
@@ -220,6 +221,7 @@ int parse_cmdline(int argc, char **argv)
 		{"pps",           required_argument, 0, PPS},
 		{"rate",          required_argument, 0, RATE},
 		{"pts",           required_argument, 0, PTS},
+		{"save-latencies",no_argument,       0, SAVE_LATENCIES},
 
 		{"num-ports",     required_argument, 0, NUM_PORTS},
 		{"num-tx-queues", required_argument, 0, NUM_TX_QUEUES},
@@ -353,6 +355,10 @@ int parse_cmdline(int argc, char **argv)
 				printf("Decreasing burst size to 64 !\n");
 				config.burst_size = 64;
 			}
+			break;
+
+		case SAVE_LATENCIES:
+			config.save_latencies = 1;
 			break;
 		}
 	}

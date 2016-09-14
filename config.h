@@ -34,6 +34,7 @@ typedef struct {
 	int duration; /* run time duration in sec */
 	uint64_t pps;  /* number of transmitted packets per sec, 0 == no delay between packets */
 	uint64_t pts; /* quit after transmitting pts packets */
+	int save_latencies; /* save latencies into txt files */
 
 	unsigned int num_ports;
 	unsigned int num_tx_queues;
