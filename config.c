@@ -200,6 +200,11 @@ static void validate_configuration(void)
 		printf("Warning: ipv6 enabled, increasing packetsize to 78 bytes\n");
 		config.packet_size = 78;
 	}
+
+	if (config.burst_size > MAX_PKT_BURST) {
+		printf("Warning: Decreasing burst size to %i !\n", MAX_PKT_BURST);
+		config.burst_size = MAX_PKT_BURST;
+	}
 }
 
 int parse_cmdline(int argc, char **argv)
@@ -351,10 +356,6 @@ int parse_cmdline(int argc, char **argv)
 
 		case BURST_SIZE:
 			config.burst_size = verify_int(optarg);
-			if (config.burst_size > 64) {
-				printf("Decreasing burst size to 64 !\n");
-				config.burst_size = 64;
-			}
 			break;
 
 		case SAVE_LATENCIES:

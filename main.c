@@ -576,7 +576,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 	while(!rx_should_stop) {
 		worker_barrier_check(b);
 
-		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, conf->burst_size);
+		nb_rx = rte_eth_rx_burst(ptd->port, ptd->queue, pkts, MAX_PKT_BURST);
 		uint64_t tsc2 = rte_rdtsc();
 
 		if (!nb_rx)
