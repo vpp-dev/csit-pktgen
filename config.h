@@ -10,6 +10,22 @@
 #define PORT_INCREMENT (1<<16)
 #define PORT_RANDOM (1<<17)
 
+#define NEIGHBOR_SOLICITATION 135
+#define NEIGHBOR_ADVERTISEMENT 136
+struct icmp
+{
+	u_int8_t  icmp_type;	/* type of message, see below */
+	u_int8_t  icmp_code;	/* type sub code */
+	u_int16_t icmp_cksum;	/* ones complement checksum of struct */
+	u_int32_t reserved;
+	u_int8_t  target_addr[16];
+
+	u_int8_t  option_type;
+	u_int8_t  option_length;
+	u_int8_t  option_ll_addr[6];
+} __attribute__((__packed__));
+
+
 #define rate_to_pps(x) ((x)/8/conf->packet_size)
 #define pps_to_rate(x) ((x)*8*conf->packet_size)
 #define IPv4_NS(a,b,c,d) ((uint32_t)(((d) & 0xff) << 24) | \

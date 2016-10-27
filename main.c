@@ -440,7 +440,89 @@ static inline void prepare_arp(config_t *conf, struct rte_mbuf *pkt, uint16_t ar
 	}
 }
 
-/* Sends 4 ARP packets */
+/* Prepares ARP packet. */
+static inline void prepare_soladv(config_t *conf, struct rte_mbuf *pkt, int port, int icmp_type)
+{
+	struct ether_hdr * eth;
+	struct ipv6_hdr * ip6;
+	struct icmp * icmpv6;
+
+	eth = rte_pktmbuf_mtod_offset(pkt, struct ether_hdr *, 0);
+	ip6 = rte_pktmbuf_mtod_offset(pkt, struct ipv6_hdr *, sizeof(*eth));
+	icmpv6 = rte_pktmbuf_mtod_offset(pkt, struct icmp *, sizeof(*eth) + sizeof(*ip6));
+
+	/* Metadata */
+	pkt->next = 0;
+	pkt->nb_segs = 1;
+	rte_pktmbuf_data_len(pkt) = sizeof(*eth) + sizeof(*ip6) + sizeof(*icmpv6);
+	rte_pktmbuf_pkt_len(pkt)  = sizeof(*eth) + sizeof(*ip6) + sizeof(*icmpv6);
+
+	if (icmp_type == NEIGHBOR_SOLICITATION)
+	{
+		/* Ethernet */
+		eth->d_addr.addr_bytes[0] = 0x33;
+		eth->d_addr.addr_bytes[1] = 0x33;
+		eth->d_addr.addr_bytes[2] = 0xff;
+		eth->d_addr.addr_bytes[3] = (uint8_t)conf->dst_ip6[port*16+13];
+		eth->d_addr.addr_bytes[4] = (uint8_t)conf->dst_ip6[port*16+14];
+		eth->d_addr.addr_bytes[5] = (uint8_t)conf->dst_ip6[port*16+15];
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &eth->s_addr);
+		eth->ether_type = rte_cpu_to_be_16(ETHER_TYPE_IPv6);
+
+		/* IPv6 */
+		ip6->proto = IPPROTO_ICMPV6;
+		ip6->vtc_flow = rte_cpu_to_be_32(0x60000000);
+		ip6->hop_limits = 0xff;
+		ip6->payload_len = rte_cpu_to_be_16(sizeof(*icmpv6));
+		memcpy(&ip6->src_addr, (const void *)&conf->src_ip6[port*16], 16);
+		memcpy(&ip6->dst_addr, (const void *)&conf->dst_ip6[port*16], 16);
+
+		/* Icmpv6 */
+		icmpv6->icmp_type = NEIGHBOR_SOLICITATION;
+		icmpv6->icmp_code = 0;
+		icmpv6->reserved = 0;
+		icmpv6->option_type = 1;
+		icmpv6->option_length = 1;
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port],
+						(struct ether_addr *)&icmpv6->option_ll_addr);
+		icmpv6->icmp_cksum = 0;
+		icmpv6->icmp_cksum = rte_ipv6_udptcp_cksum(ip6, icmpv6);
+	}
+	else if (icmp_type == NEIGHBOR_ADVERTISEMENT)
+	{
+		/* RESPONSE TO SOLICITATION */
+
+		/* Ethernet */
+		ether_addr_copy(&eth->s_addr, &eth->d_addr);
+ 		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port], &eth->s_addr);
+		eth->ether_type = rte_cpu_to_be_16(ETHER_TYPE_IPv6);
+
+		port = ~port & 1;
+
+		/* IPv6 */
+		ip6->proto = IPPROTO_ICMPV6;
+		ip6->vtc_flow = rte_cpu_to_be_32(0x60000000);
+		ip6->hop_limits = 0xff;
+		ip6->payload_len = rte_cpu_to_be_16(sizeof(*icmpv6));
+		memcpy(&ip6->src_addr, (const void *)&conf->dst_ip6[port*16], 16);
+		memcpy(&ip6->dst_addr, (const void *)&conf->src_ip6[port*16], 16);
+
+		port = ~port & 1;
+
+		/* Icmpv6 */
+		icmpv6->icmp_type = NEIGHBOR_ADVERTISEMENT;
+		icmpv6->icmp_code = 0;
+		icmpv6->reserved = rte_cpu_to_be_32(0x60000000);
+		icmpv6->option_type = 1;
+		icmpv6->option_length = 1;
+		ether_addr_copy((const struct ether_addr *)&conf->src_mac[port],
+						(struct ether_addr *)&icmpv6->option_ll_addr);
+		icmpv6->icmp_cksum = 0;
+		icmpv6->icmp_cksum = rte_ipv6_udptcp_cksum(ip6, icmpv6);
+	}
+}
+
+/* Sends 2 ARP requests */
 static inline void send_arp(config_t *conf)
 {
 	struct rte_mbuf *pkt;
@@ -449,19 +531,35 @@ static inline void send_arp(config_t *conf)
  	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 0);
 	ret += rte_eth_tx_burst(0, 0, &pkt, 1);  /* request from port 0 */
-// 	rte_pktmbuf_free(pkt);
 
 	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
 	prepare_arp(conf, pkt, ARP_OP_REQUEST, 1);
 	ret += rte_eth_tx_burst(1, 0, &pkt, 1);  /* request from port 1 */
-// 	rte_pktmbuf_free(pkt);
 
 	if (ret != 2) {
-		printf("Unable to send ARP packet ! !\n");
+		printf("Unable to send ARP packets !!\n");
 		abort();
 	}
 }
 
+static inline void send_solicitation(config_t *conf)
+{
+	struct rte_mbuf *pkt;
+	uint16_t ret = 0;
+
+	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+	prepare_soladv(conf, pkt, 0, NEIGHBOR_SOLICITATION);
+	ret += rte_eth_tx_burst(0, 0, &pkt, 1);  /* request from port 0 */
+
+	pkt = rte_pktmbuf_alloc(pktmbuf_pool);
+	prepare_soladv(conf, pkt, 1, NEIGHBOR_SOLICITATION);
+	ret += rte_eth_tx_burst(1, 0, &pkt, 1);  /* request from port 0 */
+
+	if (ret != 2) {
+		printf("Unable to send Neighbor Solicitation packets !!\n");
+		abort();
+	}
+}
 /* Main transmit function */
 static int lcore_tx_main(__attribute__((unused)) void *arg)
 {
@@ -562,6 +660,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
  	struct ipv6_hdr *ip6;
 	struct udp_hdr * udp;
 	struct arp_hdr * arp;
+	struct icmp * icmpv6;
 	FILE * fp;
 	char filename[64];
 
@@ -605,6 +704,7 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 					if (arp->arp_data.arp_tip == ptd->dst_ip4) {
 						prepare_arp(conf, pkts[i], ARP_OP_REPLY, ptd->port);
 						rte_eth_tx_burst(ptd->port, 0, &pkts[i], 1);
+						continue;
 					}
 
 					rte_pktmbuf_free(pkts[i]);
@@ -621,8 +721,31 @@ lcore_rx_main(__attribute__((unused)) void *arg)
 				}
 				ip6 = rte_pktmbuf_mtod_offset(pkts[i], struct ipv6_hdr *, sizeof(struct ether_hdr));
 				udp = rte_pktmbuf_mtod_offset(pkts[i], struct udp_hdr *, sizeof(struct ether_hdr)+sizeof(*ip6));
+				icmpv6 = rte_pktmbuf_mtod_offset(pkts[i], struct icmp *, sizeof(struct ether_hdr)+sizeof(*ip6));
 				payload = rte_pktmbuf_mtod_offset(pkts[i], packet_payload *,
 					sizeof(struct ether_hdr)+sizeof(*ip6)+sizeof(*udp));
+
+				/* handle Network solicitation request */
+				if (unlikely(ip6->proto == IPPROTO_ICMPV6)) {
+					if (icmpv6->icmp_type == NEIGHBOR_SOLICITATION) {
+						prepare_soladv(conf, pkts[i], ptd->port, NEIGHBOR_ADVERTISEMENT);
+						rte_eth_tx_burst(ptd->port, 0, &pkts[i], 1);
+
+					} else if (icmpv6->icmp_type == NEIGHBOR_ADVERTISEMENT) {
+
+						if (!memcmp(&ip6->src_addr, &conf->dst_ip6[0], 16))
+							ether_addr_copy((struct ether_addr *)&icmpv6->option_ll_addr,
+											(struct ether_addr *)&conf->dst_mac[0]);
+
+						if (!memcmp(&ip6->src_addr, &conf->dst_ip6[16], 16))
+							ether_addr_copy((struct ether_addr *)&icmpv6->option_ll_addr,
+											(struct ether_addr *)&conf->dst_mac[1]);
+
+						rte_pktmbuf_free(pkts[i]);
+						ptd->counters.num_rx_dropped++;
+						continue;
+					}
+				}
 
 				/* Is it our packet ? check addr && dst ports */
 				if ((!memcmp(ip6->src_addr, ptd->src_ip6, 16)) || (!memcmp(ip6->dst_addr, ptd->dst_ip6, 16))) {
@@ -1080,10 +1203,17 @@ int main(int argc, char **argv)
 	ptd = launch_threads(ptd, THREAD_RX);
 
 	if (conf->arp_delay) {
-		printf("Waiting %i seconds before ARP...\n", conf->arp_delay);
+		printf("Waiting %i seconds before %s...\n", conf->arp_delay,
+			   conf->ipv6 ? "Network Solicitation" : "ARP");
+
 		sleep(conf->arp_delay);
-		send_arp(conf);
-		printf("Waiting %i seconds after ARP...\n", conf->arp_delay);
+		if (conf->ipv6)
+			send_solicitation(conf);
+		else
+			send_arp(conf);
+
+		printf("Waiting %i seconds after %s...\n", conf->arp_delay,
+			   conf->ipv6 ? "Network Solicitation" : "ARP");
 		sleep(conf->arp_delay);
 	}
 
